@@ -19,6 +19,7 @@ redis==5.0.8
 pandas==2.2.3
 numpy==2.1.1
 yfinance==0.2.44
+pandas-market-calendars==4.4.1
 
 # ─── Utility ───────────────────────────────────────────────
 python-dotenv==1.0.1
