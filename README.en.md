@@ -1,6 +1,6 @@
 # MACRO Strategy
 
-**한국어** | [English](README.en.md)
+[한국어](README.md) | **English**
 
 ### Market-Adaptive Covered-call Regime Optimizer
 
@@ -11,9 +11,9 @@
 
 > **Rotating between MSTR delta exposure and MSTY premium harvest based on volatility regime — quant alpha without options, leverage abuse, or institutional infrastructure.**
 
-대부분의 MSTR/MSTY 투자자는 한 자산만을 장기적으로 보유합니다.
-본 시스템은 **변동성 국면(Regime)을 정량 분류**해서, 각 국면이 보상하는 자산으로 자동 회전시킵니다.
-알파의 원천은 자산 선택이 아니라 **회전 타이밍**.
+Most MSTR/MSTY investors hold a single asset over the long term.
+This system quantitatively classifies the **volatility regime** and rotates capital into the asset that the current regime rewards.
+The alpha source is not asset selection — it is **rotation timing**.
 
 ---
 
@@ -21,10 +21,10 @@
 
 | Market Regime | Action | Alpha |
 |---|---|---|
-| 횡보 + IV 높음 | **MSTY**로 옵션 프리미엄 수확 | 변동성 거품을 배당으로 환원 |
-| 추세 돌파 | **MSTR (+ MSTU 옵션)**로 상방 캡 제거 | MSTY의 콜 행사 손실 회피 |
-| MSTR이 NAV 대비 저평가 | **MSTR 100%** 평균 회귀 베팅 | mNAV mean-reversion |
-| 진성 risk-off | **Cash + MSTZ 단기 hedge** | 하방 델타 회피 + 비대칭 페이오프 |
+| Sideways + high IV | Harvest option premium via **MSTY** | Convert volatility froth into yield |
+| Trend breakout | Remove upside cap via **MSTR (+ MSTU overlay)** | Avoid MSTY's call-exercise drag |
+| MSTR underpriced vs. NAV | **MSTR 100%** mean-reversion bet | mNAV mean-reversion |
+| Genuine risk-off | **Cash + short-duration MSTZ hedge** | Avoid downside delta + asymmetric payoff |
 
 ---
 
@@ -37,15 +37,15 @@
 | **Value** | mNAV < 1.0 | MSTR 100% | — | — |
 | **Risk-off** | BTC support break + IV spike | Cash 75-100% | — | MSTZ ≤25%, ≤3d |
 
-**Hard constraint**: Core (MSTR + MSTY) 상시 ≥70%. Overlay 자산은 합쳐서 ≤30%.
-레버리지 ETF의 daily-reset 변동성 드래그를 5개 운영 규칙으로 봉쇄 — 자세히는 [Risk Management](#risk-management) 참조.
+**Hard constraint**: Core (MSTR + MSTY) maintained at ≥70% at all times. Overlay assets combined ≤30%.
+Daily-reset volatility drag of leveraged ETFs is contained by 5 operational rules — see [Risk Management](#risk-management).
 
 ---
 
 ## Signal Architecture — IV Decomposition
 
-순수 MSTR IV 만으론 신호가 오염됩니다 (전환사채 발행 우려, 숏 스퀴즈, mNAV 거품).
-BTC IV(Deribit)를 **24/7 leading indicator + denoising baseline**으로 사용해 분해:
+Raw MSTR IV alone produces contaminated signals (convertible-bond issuance fears, short squeezes, mNAV froth).
+We use BTC IV (Deribit) as a **24/7 leading indicator + denoising baseline** and decompose:
 
 ```
 MSTR_IV(t) ≈ β · BTC_IV(t − Δ) + EquityPremium(t)
@@ -54,25 +54,27 @@ MSTR_IV(t) ≈ β · BTC_IV(t − Δ) + EquityPremium(t)
               (24/7 leading)       (residual signal)
 ```
 
-| EquityPremium 상태 | 해석 | 시스템 액션 |
+| EquityPremium State | Interpretation | System Action |
 |---|---|---|
-| ≈ 0 | BTC vol이 MSTR vol을 설명 | Core regime 룰 그대로 |
-| ↑↑ (+2σ) | 주식판 거품 (squeeze, NAV 과열) | Risk-off 게이트, MSTY exit |
-| ↓ (음수) | MSTR이 BTC vol 저평가 | Long 시그널 (advanced) |
-| ↑ & BTC_IV ↑ | 진성 + 거품 동조 | Risk-off + downside overlay |
+| ≈ 0 | BTC vol explains MSTR vol | Apply core regime rules |
+| ↑↑ (+2σ) | Equity-side froth (squeeze, NAV overheat) | Trigger risk-off, exit MSTY |
+| ↓ (negative) | MSTR underpricing BTC vol | Long signal (advanced) |
+| ↑ & BTC_IV ↑ | Genuine + froth concurrence | Risk-off + downside overlay |
 
-**β estimation**: 90-day rolling regression vs Kalman state-space adaptive — Phase 2에서 walk-forward A/B 후 우월 모델 채택.
+**β estimation**: 90-day rolling regression vs. Kalman state-space adaptive — A/B compared in walk-forward backtest during Phase 2, superior model selected for production.
 
 ---
 
 ## Data Stack
 
+All sources free. No one-time purchases. Monthly fixed cost: **$0**.
+
 | Tier | Source | Coverage | Role |
 |---|---|---|---|
-| **1. Crypto-Native** *(24/7 leading)* | Deribit (옵션, DVOL), Coinbase·Binance (현물), Hyperliquid·Bybit (펀딩, OI, 청산) | 5+ years | 선행 시그널, denoising baseline |
-| **2. Equity** *(US hours, primary)* | yfinance (MSTR/MSTU/MSTY/MSTZ OHLCV + 분배), Polygon Options Basic (MSTR 옵션 chain 2y EOD) | 2 - 25+ years | 거래 가능한 자산의 실제 수익률, MSTR-specific IV |
-| **3. Fundamental** | SEC 8-K scrape (MSTR BTC holdings, capital structure), YieldMax IR (MSTY 분배 발표) | 2020-08+ | mNAV(EV-adjusted), 분배 timing |
-| **4. Macro** | FRED (DGS10, DXY, MOVE) | Decades | 시장 컨텍스트 |
+| **1. Crypto-Native** *(24/7 leading)* | Deribit (options, DVOL), Coinbase·Binance (spot), Hyperliquid·Bybit (funding, OI, liquidations) | 5+ years | Leading signal, denoising baseline |
+| **2. Equity** *(US hours, primary)* | yfinance (MSTR/MSTU/MSTY/MSTZ OHLCV + distributions), Polygon Options Basic (MSTR options chain 2y EOD) | 2 - 25+ years | Tradable assets' realized returns, MSTR-specific IV |
+| **3. Fundamental** | SEC 8-K scrape (MSTR BTC holdings, capital structure), YieldMax IR (MSTY distribution announcements) | 2020-08+ | mNAV (EV-adjusted), distribution timing |
+| **4. Macro** | FRED (DGS10, DXY, MOVE) | Decades | Market context |
 
 ---
 
@@ -173,62 +175,66 @@ MACRO-Strategy/
 | **5. Dashboard** | 2 weeks | ☐ Planned | Next.js mobile-first, Orval typed client |
 | **6. Deployment** | 1 week | ☐ Planned | Oracle Cloud ARM, Cloudflare Tunnel, daily DB snapshot to S3-compatible |
 
+Total **9-12 weeks**, solo developer baseline.
+
 ---
 
 ## Quick Start
 
 ```bash
 git clone <repo> && cd MACRO-Strategy
-make up                  # 첫 실행: 5-8분 (이미지 pull + Python 패키지 설치)
+make up                  # First run: 5-8 min (image pull + Python deps install)
 make verify-health       # → {"status":"ok","db":true,"timescaledb":"2.x.x","redis":true}
-make help                # 모든 타깃 리스트
+make help                # List all targets
 ```
 
 | Command | Effect |
 |---|---|
-| `make up` | core 4 서비스 시작 (postgres / redis / app / worker) |
-| `make jupyter-up` | 추가로 Jupyter (:8888) — research env |
-| `make logs` / `make logs-app` | 전체 / app 로그 tail |
+| `make up` | Start core 4 services (postgres / redis / app / worker) |
+| `make jupyter-up` | Add Jupyter (:8888) — research env |
+| `make logs` / `make logs-app` | Tail all / app logs |
 | `make shell-pg` | psql REPL |
-| `make verify-tsdb` | TimescaleDB extension 확인 |
-| `make down` | 정지 (데이터 보존) |
-| `make clean` | 정지 + volume 삭제 (확인 프롬프트 — DB 데이터 영구 삭제) |
+| `make migrate` | Apply pending alembic migrations |
+| `make seed-calendar` | Seed market_calendar (NYSE + crypto, 2017-2030) |
+| `make verify-tsdb` | Verify TimescaleDB extension |
+| `make down` | Stop (data preserved) |
+| `make clean` | Stop + remove volumes (confirms — permanent DB data loss) |
 
 ---
 
 ## Risk Management
 
-레버리지 ETF의 daily-reset 변동성 드래그를 운영 규칙으로 봉쇄.
-**자유 재량 금지** — 모든 진입·청산은 사전 정의된 게이트.
+Daily-reset volatility drag of leveraged ETFs is contained by operational rules.
+**No discretion** — every entry and exit is a pre-defined gate.
 
 ### MSTU (2x long, Trend regime)
 
-| 항목 | 룰 |
+| Item | Rule |
 |---|---|
-| 진입 게이트 (모두 통과) | BTC funding ≤ 0 **AND** BTC IV30 < 30D 평균 **AND** mNAV < 1.5x |
-| 비중 캡 | portfolio의 ≤ 25% |
-| 보유 기간 | ≤ 5 trading days, 이후 자동으로 MSTR로 rollover |
+| Entry gates (all required) | BTC funding ≤ 0 **AND** BTC IV30 < 30D average **AND** mNAV < 1.5x |
+| Position cap | ≤ 25% of portfolio |
+| Holding period | ≤ 5 trading days, then auto-rollover to MSTR |
 
-### MSTZ (-2x inverse, Risk-off regime) — 5 규칙
+### MSTZ (-2x inverse, Risk-off regime) — 5 Rules
 
-| # | 규칙 | 이유 |
+| # | Rule | Reason |
 |---|---|---|
-| 1 | 보유 ≤3 trading days (hard stop) | daily 리셋 decay는 보유일에 비례 |
-| 2 | 다중 트리거 진입 (≥3 게이트 동시) | 단일 시그널 false-positive가 decay에 잡힘 |
-| 3 | 단계적 entry (33/33/34, 3일 분할) | whipsaw 보호, 첫 false 시그널은 1/3만 노출 |
-| 4 | Vol-aware 사이징: `alloc = base × (1 − norm_RV20)` | RV가 decay의 twin — 높을수록 비중 자동 축소 |
-| 5 | MSTR -10%에서 50% 즉시 익절 | 반등에서 mean-reversion에 잡히기 전에 확정 |
+| 1 | Hold ≤3 trading days (hard stop) | Daily-reset decay accumulates with holding period |
+| 2 | Multi-trigger entry (≥3 gates simultaneously) | Single-signal false-positives get eaten by decay |
+| 3 | Phased entry (33/33/34 over 3 days) | Whipsaw protection — first false signal exposes only 1/3 |
+| 4 | Vol-aware sizing: `alloc = base × (1 − norm_RV20)` | RV is decay's twin — higher RV → smaller position |
+| 5 | At MSTR -10%, immediately close 50% | Lock in profit before mean-reversion catches the rebound |
 
-### Core 자산 (MSTR + MSTY)
+### Core Asset (MSTR + MSTY)
 
-항상 portfolio의 **≥ 70%** 점유. Overlay는 *enhancement*이지 bet-the-farm 아님.
-Phase 3 backtest에서 (Core only) vs (Core + Overlay) A/B 후 OOS Sharpe 우월할 때만 Overlay production 채택.
+Always ≥ **70%** of portfolio. Overlay is *enhancement*, not bet-the-farm.
+Phase 3 backtest will A/B (Core only) vs. (Core + Overlay); Overlay enters production only if OOS Sharpe demonstrably improves.
 
 ---
 
 ## Disclaimer
 
-본 시스템은 **시그널 전용 (Signal-only)**입니다.
-자동 주문 실행을 수행하지 않으며, 한국 자본시장법상 투자자문업이 아닙니다.
-모든 매매 결정과 결과의 책임은 사용자 본인에게 있습니다.
-과거 데이터를 기반으로 한 수리 모델이며 미래 수익을 보장하지 않습니다.
+This system is **signal-only**.
+It does not execute orders automatically and is not a registered investment advisory under Korean 자본시장법 (Capital Markets Act).
+All trading decisions and outcomes are the user's sole responsibility.
+The system uses mathematical models on historical data; future returns are not guaranteed.
