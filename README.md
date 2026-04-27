@@ -1,6 +1,7 @@
 # MACRO Strategy
 
-**한국어** | [English](README.en.md)
+[![한국어](https://img.shields.io/badge/%ED%95%9C%EA%B5%AD%EC%96%B4-2962FF?style=for-the-badge)](README.md)
+[![English](https://img.shields.io/badge/English-757575?style=for-the-badge)](README.en.md)
 
 ### Market-Adaptive Covered-call Regime Optimizer
 
