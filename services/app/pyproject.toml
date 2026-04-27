@@ -1,0 +1,19 @@
+[project]
+name = "macro-strategy"
+version = "0.1.0"
+description = "MACRO Strategy: regime-adaptive MSTR/MSTY/MSTU/MSTZ signal system"
+requires-python = ">=3.12"
+readme = { content-type = "text/markdown", text = "See repo root README." }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"

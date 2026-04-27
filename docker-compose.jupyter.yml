@@ -1,0 +1,19 @@
+# Local dev-only overrides. NOT used in Oracle deployment.
+# Adds Jupyter for research notebooks against the same DB.
+services:
+  jupyter:
+    image: jupyter/scipy-notebook:python-3.11
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-macro}
+      DATABASE_URL: ${SYNC_DATABASE_URL}
+    volumes:
+      - ./research:/home/jovyan/work
+    depends_on:
+      postgres: { condition: service_healthy }
+    command: >
+      start-notebook.sh
+      --NotebookApp.token=${JUPYTER_TOKEN:-macro}
+      --NotebookApp.password=''
