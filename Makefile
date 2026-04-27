@@ -68,6 +68,18 @@ migrate-history: ## Show full migration history
 seed-calendar: ## Seed market_calendar (NYSE + crypto, 2017-2030)
 	docker compose exec -T app python -m scripts.seed_market_calendar
 
+backfill-equities: ## Backfill MSTR/MSTU/MSTY/MSTZ via yfinance (2017-today)
+	docker compose exec -T app python -m scripts.backfill_equities
+
+verify-equities: ## Show equity coverage (counts, date range per ticker)
+	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
+		-c "SELECT ticker, COUNT(*) AS days, MIN(ts) AS first, MAX(ts) AS last FROM equity_ohlcv GROUP BY ticker ORDER BY ticker;" \
+		-c "SELECT ticker, type, COUNT(*) AS rows, MIN(ex_date) AS first, MAX(ex_date) AS last FROM distributions GROUP BY ticker, type ORDER BY ticker, type;"
+
+verify-runs: ## Show last 10 ingestion runs
+	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
+		-c "SELECT id, source, mode, status, rows_ingested, ROUND(EXTRACT(EPOCH FROM (ended_at - started_at))::numeric, 1) AS duration_s, started_at FROM ingestion_runs ORDER BY id DESC LIMIT 10;"
+
 db-tables: ## List tables and hypertables
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
 		-c "\dt" \
@@ -90,5 +102,6 @@ clean: ## Stop and REMOVE volumes (DESTROYS DATA!)
 .PHONY: help up down build rebuild logs logs-app logs-worker ps restart \
         shell-app shell-pg shell-redis verify-health verify-tsdb \
         migrate migrate-down migrate-status migrate-history \
-        seed-calendar db-tables db-reset \
+        seed-calendar backfill-equities verify-equities verify-runs \
+        db-tables db-reset \
         jupyter-up jupyter-down clean
