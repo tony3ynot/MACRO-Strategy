@@ -80,6 +80,12 @@ backfill-btc-daily: ## Backfill BTC-USD daily OHLCV from Coinbase (2017-today)
 backfill-mstr-holdings: ## Backfill MSTR BTC holdings from SEC EDGAR 8-K filings
 	docker compose exec -T app python -m scripts.backfill_mstr_holdings
 
+backfill-binance-funding: ## Backfill Binance BTC perp funding (2020-today, 8h cadence)
+	docker compose exec -T app python -m scripts.backfill_binance_funding
+
+backfill-hyperliquid-funding: ## Backfill Hyperliquid BTC perp funding (2023-today, 1h cadence)
+	docker compose exec -T app python -m scripts.backfill_hyperliquid_funding
+
 backfill-polygon-options: ## Backfill MSTR options chain (small slice; pass START/END for custom range)
 	docker compose exec -T app python -m scripts.backfill_polygon_options $(if $(START),--start $(START)) $(if $(END),--end $(END))
 
@@ -112,6 +118,11 @@ verify-options: ## Show MSTR options coverage
 		-c "SELECT type, COUNT(*) AS rows FROM options_chain WHERE underlying='MSTR' GROUP BY type;" \
 		-c "SELECT ts, expiry, strike, type, ROUND(last::numeric, 2) AS last, volume FROM options_chain WHERE underlying='MSTR' ORDER BY ts DESC, expiry, strike LIMIT 10;"
 
+verify-funding: ## Show crypto perp funding coverage by venue
+	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
+		-c "SELECT venue, symbol, COUNT(*) AS events, MIN(ts)::date AS first, MAX(ts)::date AS last, ROUND(AVG(funding_rate)::numeric * 1e4, 4) AS avg_rate_bp FROM crypto_perp_funding GROUP BY venue, symbol ORDER BY venue;" \
+		-c "SELECT venue, ts, ROUND(funding_rate::numeric * 1e4, 4) AS rate_bp FROM crypto_perp_funding ORDER BY ts DESC LIMIT 10;"
+
 verify-runs: ## Show last 10 ingestion runs
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
 		-c "SELECT id, source, mode, status, rows_ingested, ROUND(EXTRACT(EPOCH FROM (ended_at - started_at))::numeric, 1) AS duration_s, started_at FROM ingestion_runs ORDER BY id DESC LIMIT 10;"
@@ -141,7 +152,8 @@ clean: ## Stop and REMOVE volumes (DESTROYS DATA!)
         seed-calendar \
         backfill-equities backfill-btc-dvol backfill-btc-daily backfill-mstr-holdings \
         backfill-polygon-options backfill-polygon-options-2y \
+        backfill-binance-funding backfill-hyperliquid-funding \
         verify-equities verify-btc-dvol verify-btc-daily verify-mstr-holdings \
-        verify-options verify-runs \
+        verify-options verify-funding verify-runs \
         db-tables db-reset \
         jupyter-up jupyter-down clean
