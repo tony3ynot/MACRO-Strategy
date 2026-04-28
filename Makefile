@@ -71,10 +71,18 @@ seed-calendar: ## Seed market_calendar (NYSE + crypto, 2017-2030)
 backfill-equities: ## Backfill MSTR/MSTU/MSTY/MSTZ via yfinance (2017-today)
 	docker compose exec -T app python -m scripts.backfill_equities
 
+backfill-btc-dvol: ## Backfill BTC DVOL from Deribit (2020-today, clamped to ~2021-03 launch)
+	docker compose exec -T app python -m scripts.backfill_btc_dvol
+
 verify-equities: ## Show equity coverage (counts, date range per ticker)
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
 		-c "SELECT ticker, COUNT(*) AS days, MIN(ts) AS first, MAX(ts) AS last FROM equity_ohlcv GROUP BY ticker ORDER BY ticker;" \
 		-c "SELECT ticker, type, COUNT(*) AS rows, MIN(ex_date) AS first, MAX(ex_date) AS last FROM distributions GROUP BY ticker, type ORDER BY ticker, type;"
+
+verify-btc-dvol: ## Show DVOL coverage (count, date range, recent values)
+	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
+		-c "SELECT COUNT(*) AS rows, MIN(ts)::date AS first, MAX(ts)::date AS last, ROUND(AVG(dvol)::numeric, 2) AS avg_dvol, ROUND(MIN(dvol)::numeric, 2) AS min_dvol, ROUND(MAX(dvol)::numeric, 2) AS max_dvol FROM btc_dvol;" \
+		-c "SELECT ts::date, ROUND(dvol::numeric, 2) AS dvol FROM btc_dvol ORDER BY ts DESC LIMIT 5;"
 
 verify-runs: ## Show last 10 ingestion runs
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
@@ -102,6 +110,7 @@ clean: ## Stop and REMOVE volumes (DESTROYS DATA!)
 .PHONY: help up down build rebuild logs logs-app logs-worker ps restart \
         shell-app shell-pg shell-redis verify-health verify-tsdb \
         migrate migrate-down migrate-status migrate-history \
-        seed-calendar backfill-equities verify-equities verify-runs \
+        seed-calendar backfill-equities backfill-btc-dvol \
+        verify-equities verify-btc-dvol verify-runs \
         db-tables db-reset \
         jupyter-up jupyter-down clean
