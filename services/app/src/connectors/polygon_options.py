@@ -173,8 +173,10 @@ class PolygonOptionsIngestor(Ingestor):
     # ──── Per-contract fetch ────────────────────────────────────────────
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=2, min=2, max=30),
+        stop=stop_after_attempt(4),
+        # On 429, wait long enough to fully reset Polygon's sliding window
+        # (60s + buffer). Other HTTP errors retry sooner.
+        wait=wait_exponential(multiplier=4, min=15, max=75),
         retry=retry_if_exception_type((PolygonRateLimitError, httpx.HTTPError)),
     )
     def _ingest_contract(

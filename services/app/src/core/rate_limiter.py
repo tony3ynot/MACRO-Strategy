@@ -1,7 +1,15 @@
-"""Synchronous token-bucket rate limiter.
+"""Synchronous strict-interval rate limiter.
 
-Use for strict API quotas (e.g., Polygon Basic at 5 req/min). The acquire()
-call blocks until a token is available, ensuring we never exceed the quota.
+Why strict-interval (not token-bucket):
+  Polygon Basic enforces 5 req/min as a SLIDING window, not a fixed
+  per-minute counter. A traditional token bucket allows bursting (5 calls
+  back-to-back, then wait), which trips the sliding-window detector and
+  yields 429s. We instead enforce a hard minimum interval between calls
+  (60s / rate_per_minute × safety_margin), which guarantees the rolling
+  window stays under the cap.
+
+Acquire() blocks the caller until enough time has elapsed since the
+previous call. Thread-safe via internal lock.
 """
 from __future__ import annotations
 
@@ -11,42 +19,43 @@ import time
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SAFETY_MARGIN = 1.08  # 8% buffer over nominal interval
+
 
 class TokenBucketRateLimiter:
-    """Token-bucket: refills at `rate_per_minute / 60` tokens/sec, capacity = rate_per_minute.
+    """Strict-interval limiter (name retained for compatibility).
 
-    Thread-safe via internal lock. Synchronous API: acquire() blocks until a
-    token is available.
+    `rate_per_minute` is the API's stated cap; we space calls by
+    (60 / rate_per_minute) × safety_margin seconds. Setting safety_margin
+    above 1.0 protects against sliding-window edge cases where a call
+    timed exactly at the boundary still counts as the (N+1)-th call.
     """
 
-    def __init__(self, rate_per_minute: int, name: str = "limiter"):
+    def __init__(
+        self,
+        rate_per_minute: int,
+        name: str = "limiter",
+        safety_margin: float = DEFAULT_SAFETY_MARGIN,
+    ):
         if rate_per_minute <= 0:
             raise ValueError("rate_per_minute must be > 0")
-        self.rate_per_second = rate_per_minute / 60.0
-        self.capacity = float(rate_per_minute)
-        self._tokens = float(rate_per_minute)
-        self._last_refill = time.monotonic()
+        if safety_margin < 1.0:
+            raise ValueError("safety_margin must be >= 1.0 (otherwise we'd burst)")
+        self.min_interval = (60.0 / rate_per_minute) * safety_margin
+        self._last_call = 0.0  # monotonic clock; 0.0 means "first call OK immediately"
         self._lock = threading.Lock()
         self._name = name
 
     def acquire(self) -> None:
         with self._lock:
-            self._refill()
-            while self._tokens < 1.0:
-                deficit = 1.0 - self._tokens
-                wait = deficit / self.rate_per_second
-                logger.debug("[%s] rate-limit sleep %.2fs", self._name, wait)
-                # Release lock during sleep so other threads can refill.
+            now = time.monotonic()
+            elapsed = now - self._last_call
+            if self._last_call > 0 and elapsed < self.min_interval:
+                wait = self.min_interval - elapsed
+                logger.debug("[%s] interval sleep %.2fs", self._name, wait)
                 self._lock.release()
                 try:
-                    time.sleep(wait + 0.05)
+                    time.sleep(wait)
                 finally:
                     self._lock.acquire()
-                self._refill()
-            self._tokens -= 1.0
-
-    def _refill(self) -> None:
-        now = time.monotonic()
-        elapsed = now - self._last_refill
-        self._tokens = min(self.capacity, self._tokens + elapsed * self.rate_per_second)
-        self._last_refill = now
+            self._last_call = time.monotonic()
