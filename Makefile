@@ -89,6 +89,23 @@ backfill-hyperliquid-funding: ## Backfill Hyperliquid BTC perp funding (2023-tod
 backfill-yieldmax-msty: ## Enrich MSTY distributions with YieldMax ROC% classification
 	docker compose exec -T app python -m scripts.backfill_yieldmax_msty
 
+beat-schedule: ## Show celery beat schedule (next runs)
+	@docker compose exec -T worker celery -A workers.celery_app inspect scheduled 2>/dev/null || true
+	@docker compose exec -T worker python -c "from workers.beat_schedule import beat_schedule; \
+	  [print(f'  {k:35s} {v[\"schedule\"]}') for k,v in beat_schedule.items()]"
+
+worker-active: ## Show active celery tasks
+	docker compose exec -T worker celery -A workers.celery_app inspect active
+
+telegram-test: ## Send a test message via Telegram (requires TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID)
+	docker compose exec -T app python -c "from core.notifications.telegram import TelegramClient; \
+	  c = TelegramClient(); \
+	  print('configured:', c.is_configured); \
+	  c.is_configured and c.send_plain('MACRO Strategy: telegram_test ok')"
+
+briefing-preview: ## Build today's briefing body without sending it
+	docker compose exec -T app python -c "from workers.tasks import _build_briefing_body; print(_build_briefing_body())"
+
 backfill-polygon-options: ## Backfill MSTR options chain (small slice; pass START/END for custom range)
 	docker compose exec -T app python -m scripts.backfill_polygon_options $(if $(START),--start $(START)) $(if $(END),--end $(END))
 
@@ -161,6 +178,7 @@ clean: ## Stop and REMOVE volumes (DESTROYS DATA!)
         backfill-equities backfill-btc-dvol backfill-btc-daily backfill-mstr-holdings \
         backfill-polygon-options backfill-polygon-options-2y \
         backfill-binance-funding backfill-hyperliquid-funding backfill-yieldmax-msty \
+        beat-schedule worker-active telegram-test briefing-preview \
         verify-equities verify-btc-dvol verify-btc-daily verify-mstr-holdings \
         verify-options verify-funding verify-msty-classification verify-runs \
         db-tables db-reset \

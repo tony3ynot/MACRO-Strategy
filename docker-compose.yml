@@ -64,7 +64,10 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
-    command: celery -A workers.celery_app worker --concurrency=2 --loglevel=info
+    command: >
+      celery -A workers.celery_app worker --beat
+      --schedule=/tmp/celerybeat-schedule
+      --concurrency=2 --loglevel=info
 
 volumes:
   pg_data:
