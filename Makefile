@@ -77,6 +77,9 @@ backfill-btc-dvol: ## Backfill BTC DVOL from Deribit (2020-today, clamped to ~20
 backfill-btc-daily: ## Backfill BTC-USD daily OHLCV from Coinbase (2017-today)
 	docker compose exec -T app python -m scripts.backfill_btc_daily
 
+backfill-mstr-holdings: ## Backfill MSTR BTC holdings from SEC EDGAR 8-K filings
+	docker compose exec -T app python -m scripts.backfill_mstr_holdings
+
 verify-equities: ## Show equity coverage (counts, date range per ticker)
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
 		-c "SELECT ticker, COUNT(*) AS days, MIN(ts) AS first, MAX(ts) AS last FROM equity_ohlcv GROUP BY ticker ORDER BY ticker;" \
@@ -91,6 +94,11 @@ verify-btc-daily: ## Show Coinbase BTC daily coverage
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
 		-c "SELECT source, COUNT(*) AS days, MIN(date) AS first, MAX(date) AS last, ROUND(MIN(close)::numeric, 0) AS min_close, ROUND(MAX(close)::numeric, 0) AS max_close FROM btc_ohlcv_daily GROUP BY source ORDER BY source;" \
 		-c "SELECT date, ROUND(close::numeric, 2) AS close, ROUND(volume::numeric, 1) AS volume FROM btc_ohlcv_daily ORDER BY date DESC LIMIT 5;"
+
+verify-mstr-holdings: ## Show MSTR BTC holdings progression
+	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
+		-c "SELECT COUNT(*) AS rows, MIN(date) AS first, MAX(date) AS last, MAX(btc_qty) AS current_btc FROM mstr_btc_holdings;" \
+		-c "SELECT date, btc_qty, ROUND((cumulative_cost/1e9)::numeric, 2) AS cost_usd_b, source_filing FROM mstr_btc_holdings ORDER BY date DESC LIMIT 10;"
 
 verify-runs: ## Show last 10 ingestion runs
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
@@ -118,7 +126,8 @@ clean: ## Stop and REMOVE volumes (DESTROYS DATA!)
 .PHONY: help up down build rebuild logs logs-app logs-worker ps restart \
         shell-app shell-pg shell-redis verify-health verify-tsdb \
         migrate migrate-down migrate-status migrate-history \
-        seed-calendar backfill-equities backfill-btc-dvol backfill-btc-daily \
-        verify-equities verify-btc-dvol verify-btc-daily verify-runs \
+        seed-calendar \
+        backfill-equities backfill-btc-dvol backfill-btc-daily backfill-mstr-holdings \
+        verify-equities verify-btc-dvol verify-btc-daily verify-mstr-holdings verify-runs \
         db-tables db-reset \
         jupyter-up jupyter-down clean

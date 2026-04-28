@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
 
+    # SEC EDGAR requires a User-Agent identifying the requester
+    sec_user_agent: str = "MACRO Strategy macro-strategy@example.com"
+
 
 @lru_cache
 def get_settings() -> Settings:
