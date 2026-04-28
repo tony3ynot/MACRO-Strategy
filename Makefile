@@ -86,6 +86,9 @@ backfill-binance-funding: ## Backfill Binance BTC perp funding (2020-today, 8h c
 backfill-hyperliquid-funding: ## Backfill Hyperliquid BTC perp funding (2023-today, 1h cadence)
 	docker compose exec -T app python -m scripts.backfill_hyperliquid_funding
 
+backfill-yieldmax-msty: ## Enrich MSTY distributions with YieldMax ROC% classification
+	docker compose exec -T app python -m scripts.backfill_yieldmax_msty
+
 backfill-polygon-options: ## Backfill MSTR options chain (small slice; pass START/END for custom range)
 	docker compose exec -T app python -m scripts.backfill_polygon_options $(if $(START),--start $(START)) $(if $(END),--end $(END))
 
@@ -123,6 +126,11 @@ verify-funding: ## Show crypto perp funding coverage by venue
 		-c "SELECT venue, symbol, COUNT(*) AS events, MIN(ts)::date AS first, MAX(ts)::date AS last, ROUND(AVG(funding_rate)::numeric * 1e4, 4) AS avg_rate_bp FROM crypto_perp_funding GROUP BY venue, symbol ORDER BY venue;" \
 		-c "SELECT venue, ts, ROUND(funding_rate::numeric * 1e4, 4) AS rate_bp FROM crypto_perp_funding ORDER BY ts DESC LIMIT 10;"
 
+verify-msty-classification: ## Show MSTY ROC classification coverage
+	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
+		-c "SELECT COUNT(*) AS rows, COUNT(roc_pct) AS classified, ROUND(AVG(roc_pct)::numeric, 2) AS avg_roc_pct, ROUND(MIN(roc_pct)::numeric, 2) AS min_roc, ROUND(MAX(roc_pct)::numeric, 2) AS max_roc FROM distributions WHERE ticker='MSTY' AND type='dividend';" \
+		-c "SELECT ex_date, pay_date, ROUND(amount::numeric, 4) AS amount, ROUND(roc_pct::numeric, 2) AS roc_pct, classification FROM distributions WHERE ticker='MSTY' AND type='dividend' ORDER BY ex_date DESC LIMIT 12;"
+
 verify-runs: ## Show last 10 ingestion runs
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
 		-c "SELECT id, source, mode, status, rows_ingested, ROUND(EXTRACT(EPOCH FROM (ended_at - started_at))::numeric, 1) AS duration_s, started_at FROM ingestion_runs ORDER BY id DESC LIMIT 10;"
@@ -152,8 +160,8 @@ clean: ## Stop and REMOVE volumes (DESTROYS DATA!)
         seed-calendar \
         backfill-equities backfill-btc-dvol backfill-btc-daily backfill-mstr-holdings \
         backfill-polygon-options backfill-polygon-options-2y \
-        backfill-binance-funding backfill-hyperliquid-funding \
+        backfill-binance-funding backfill-hyperliquid-funding backfill-yieldmax-msty \
         verify-equities verify-btc-dvol verify-btc-daily verify-mstr-holdings \
-        verify-options verify-funding verify-runs \
+        verify-options verify-funding verify-msty-classification verify-runs \
         db-tables db-reset \
         jupyter-up jupyter-down clean
