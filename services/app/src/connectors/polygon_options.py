@@ -10,8 +10,7 @@ Constraints (Basic tier):
 - Snapshot and grouped-daily endpoints are blocked (403/400)
 
 Stored fields per (underlying, ts, expiry, strike, type):
-  open, high, low, close → `last` column populated from close
-  volume
+  open, high, low, last(=close), volume, vwap, transactions → from Polygon
   iv, delta, gamma, vega, theta, bid, ask, oi → NULL (computed in Phase 2
   via Black-Scholes inversion using equity_ohlcv close + this close)
 """
@@ -43,15 +42,26 @@ class PolygonRateLimitError(Exception):
 class PolygonOptionsIngestor(Ingestor):
     source = "polygon"
 
-    def __init__(self, engine=None, strike_pct_band: float = 0.5):
+    def __init__(
+        self,
+        engine=None,
+        strike_pct_band: float = 0.15,
+        max_dte_days: int = 45,
+    ):
         """strike_pct_band: include strikes within ±this fraction of recent
-        MSTR close (0.5 = ±50%, captures liquid range, skips deep OTM/ITM)."""
+        MSTR close. Default 0.15 (±15%) covers liquid ATM zone for VRP/IV30;
+        widen to 0.30+ for skew, narrow to 0.05 for fastest backfill.
+
+        max_dte_days: how far past `end` to include expiries. Default 45 is
+        enough for IV30 (need ~25-35 DTE on each date in window). Raise to
+        120 for full term-structure (up to 90 DTE) or skew analysis."""
         super().__init__(engine=engine)
         self.api_key = get_settings().polygon_api_key
         if not self.api_key:
             raise RuntimeError("POLYGON_API_KEY required")
         self.limiter = TokenBucketRateLimiter(RATE_LIMIT_PER_MIN, name="polygon")
         self.strike_pct_band = strike_pct_band
+        self.max_dte_days = max_dte_days
 
     # ──── Ingestor entry ────────────────────────────────────────────────
 
@@ -101,7 +111,7 @@ class PolygonOptionsIngestor(Ingestor):
                     "underlying_ticker": UNDERLYING,
                     "expired": expired_flag,
                     "expiration_date.gte": start.isoformat(),
-                    "expiration_date.lte": (end + timedelta(days=120)).isoformat(),
+                    "expiration_date.lte": (end + timedelta(days=self.max_dte_days)).isoformat(),
                     "strike_price.gte": str(strike_lo),
                     "strike_price.lte": str(strike_hi),
                     "limit": 1000,
@@ -205,11 +215,16 @@ class PolygonOptionsIngestor(Ingestor):
                 "strike": strike,
                 "type": opt_type,
                 "bid": None, "ask": None,
+                "open": float(bar["o"]) if bar.get("o") is not None else None,
+                "high": float(bar["h"]) if bar.get("h") is not None else None,
+                "low":  float(bar["l"]) if bar.get("l") is not None else None,
                 "last": float(bar["c"]),
+                "vwap": float(bar["vw"]) if bar.get("vw") is not None else None,
                 "iv": None,
                 "delta": None, "gamma": None, "vega": None, "theta": None,
                 "oi": None,
-                "volume": int(bar["v"]),
+                "volume": int(bar["v"]) if bar.get("v") is not None else 0,
+                "transactions": int(bar["n"]) if bar.get("n") is not None else None,
                 "source": self.source,
             })
 
@@ -218,17 +233,24 @@ class PolygonOptionsIngestor(Ingestor):
                 text("""
                     INSERT INTO options_chain
                         (underlying, ts, expiry, strike, type,
-                         bid, ask, last, iv, delta, gamma, vega, theta,
-                         oi, volume, source)
+                         bid, ask, open, high, low, last, vwap,
+                         iv, delta, gamma, vega, theta,
+                         oi, volume, transactions, source)
                     VALUES
                         (:underlying, :ts, :expiry, :strike, :type,
-                         :bid, :ask, :last, :iv, :delta, :gamma, :vega, :theta,
-                         :oi, :volume, :source)
+                         :bid, :ask, :open, :high, :low, :last, :vwap,
+                         :iv, :delta, :gamma, :vega, :theta,
+                         :oi, :volume, :transactions, :source)
                     ON CONFLICT (underlying, ts, expiry, strike, type) DO UPDATE SET
-                        last        = EXCLUDED.last,
-                        volume      = EXCLUDED.volume,
-                        source      = EXCLUDED.source,
-                        ingested_at = now()
+                        open         = EXCLUDED.open,
+                        high         = EXCLUDED.high,
+                        low          = EXCLUDED.low,
+                        last         = EXCLUDED.last,
+                        vwap         = EXCLUDED.vwap,
+                        volume       = EXCLUDED.volume,
+                        transactions = EXCLUDED.transactions,
+                        source       = EXCLUDED.source,
+                        ingested_at  = now()
                 """),
                 records,
             )

@@ -30,8 +30,13 @@ def main() -> int:
     parser.add_argument("--start", type=date.fromisoformat, default=today - timedelta(days=7))
     parser.add_argument("--end", type=date.fromisoformat, default=today)
     parser.add_argument("--mode", choices=["backfill", "daily"], default="backfill")
-    parser.add_argument("--strike-band", type=float, default=0.5,
-                        help="Include strikes within ±this fraction of MSTR close (default 0.5)")
+    parser.add_argument("--strike-band", type=float, default=0.15,
+                        help="Include strikes within ±this fraction of MSTR close "
+                             "(default 0.15 = ±15%%, ATM zone for VRP/IV30; "
+                             "0.05=fastest, 0.30=full skew)")
+    parser.add_argument("--max-dte", type=int, default=45,
+                        help="Include expiries up to N days past --end "
+                             "(default 45 = IV30 minimum; raise to 120 for term structure)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -42,9 +47,12 @@ def main() -> int:
     )
 
     print(f"Polygon Options backfill: {args.start} → {args.end} "
-          f"(mode={args.mode}, strike±{args.strike_band*100:.0f}%)")
+          f"(mode={args.mode}, strike±{args.strike_band*100:.0f}%, max_dte={args.max_dte}d)")
 
-    ingestor = PolygonOptionsIngestor(strike_pct_band=args.strike_band)
+    ingestor = PolygonOptionsIngestor(
+        strike_pct_band=args.strike_band,
+        max_dte_days=args.max_dte,
+    )
     result = ingestor.run(args.start, args.end, mode=args.mode)
 
     print(
