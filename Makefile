@@ -80,6 +80,12 @@ backfill-btc-daily: ## Backfill BTC-USD daily OHLCV from Coinbase (2017-today)
 backfill-mstr-holdings: ## Backfill MSTR BTC holdings from SEC EDGAR 8-K filings
 	docker compose exec -T app python -m scripts.backfill_mstr_holdings
 
+backfill-polygon-options: ## Backfill MSTR options chain (small slice; pass START/END for custom range)
+	docker compose exec -T app python -m scripts.backfill_polygon_options $(if $(START),--start $(START)) $(if $(END),--end $(END))
+
+backfill-polygon-options-2y: ## Full 2-year MSTR options backfill (~16h overnight)
+	docker compose exec -T app python -m scripts.backfill_polygon_options --start $$(date -d '2 years ago' '+%Y-%m-%d') --end $$(date '+%Y-%m-%d')
+
 verify-equities: ## Show equity coverage (counts, date range per ticker)
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
 		-c "SELECT ticker, COUNT(*) AS days, MIN(ts) AS first, MAX(ts) AS last FROM equity_ohlcv GROUP BY ticker ORDER BY ticker;" \
@@ -99,6 +105,12 @@ verify-mstr-holdings: ## Show MSTR BTC holdings progression
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
 		-c "SELECT COUNT(*) AS rows, MIN(date) AS first, MAX(date) AS last, MAX(btc_qty) AS current_btc FROM mstr_btc_holdings;" \
 		-c "SELECT date, btc_qty, ROUND((cumulative_cost/1e9)::numeric, 2) AS cost_usd_b, source_filing FROM mstr_btc_holdings ORDER BY date DESC LIMIT 10;"
+
+verify-options: ## Show MSTR options coverage
+	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
+		-c "SELECT COUNT(*) AS rows, COUNT(DISTINCT expiry) AS expiries, COUNT(DISTINCT strike) AS strikes, MIN(ts) AS first, MAX(ts) AS last FROM options_chain WHERE underlying='MSTR';" \
+		-c "SELECT type, COUNT(*) AS rows FROM options_chain WHERE underlying='MSTR' GROUP BY type;" \
+		-c "SELECT ts, expiry, strike, type, ROUND(last::numeric, 2) AS last, volume FROM options_chain WHERE underlying='MSTR' ORDER BY ts DESC, expiry, strike LIMIT 10;"
 
 verify-runs: ## Show last 10 ingestion runs
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
@@ -128,6 +140,8 @@ clean: ## Stop and REMOVE volumes (DESTROYS DATA!)
         migrate migrate-down migrate-status migrate-history \
         seed-calendar \
         backfill-equities backfill-btc-dvol backfill-btc-daily backfill-mstr-holdings \
-        verify-equities verify-btc-dvol verify-btc-daily verify-mstr-holdings verify-runs \
+        backfill-polygon-options backfill-polygon-options-2y \
+        verify-equities verify-btc-dvol verify-btc-daily verify-mstr-holdings \
+        verify-options verify-runs \
         db-tables db-reset \
         jupyter-up jupyter-down clean
