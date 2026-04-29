@@ -43,6 +43,12 @@ beat_schedule = {
         "schedule": crontab(hour="*/6", minute=20),
     },
 
+    # ── Indicators (runs after all daily ingestors land) ───────────────
+    "compute-indicators-daily": {
+        "task": "workers.tasks.compute_indicators_daily",
+        "schedule": crontab(hour=22, minute=30),  # 1h after equity ingest
+    },
+
     # ── Output ─────────────────────────────────────────────────────────
     "send-daily-briefing": {
         "task": "workers.tasks.send_daily_briefing",

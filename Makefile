@@ -106,6 +106,17 @@ telegram-test: ## Send a test message via Telegram (requires TELEGRAM_BOT_TOKEN 
 briefing-preview: ## Build today's briefing body without sending it
 	docker compose exec -T app python -c "from workers.tasks import _build_briefing_body; print(_build_briefing_body())"
 
+compute-indicators: ## Compute indicators_daily (full history)
+	docker compose exec -T app python -m scripts.compute_indicators
+
+compute-indicators-recent: ## Recompute the last 30 days of indicators_daily
+	docker compose exec -T app python -m scripts.compute_indicators --lookback 30
+
+verify-indicators: ## Show indicators_daily coverage and recent values
+	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
+		-c "SELECT COUNT(*) AS rows, MIN(date) AS first, MAX(date) AS last, COUNT(btc_iv30) AS iv30_days, COUNT(btc_vrp) AS vrp_days, COUNT(mnav) AS mnav_days FROM indicators_daily;" \
+		-c "SELECT date, ROUND(btc_close::numeric, 0) AS btc, ROUND(mstr_close::numeric, 2) AS mstr, ROUND(btc_rv20::numeric, 4) AS btc_rv, ROUND(btc_iv30::numeric, 4) AS btc_iv, ROUND(btc_vrp::numeric, 4) AS btc_vrp, ROUND(mstr_rv20::numeric, 4) AS mstr_rv, ROUND(mnav::numeric, 3) AS mnav FROM indicators_daily ORDER BY date DESC LIMIT 10;"
+
 backfill-polygon-options: ## Backfill MSTR options chain (small slice; pass START/END for custom range)
 	docker compose exec -T app python -m scripts.backfill_polygon_options $(if $(START),--start $(START)) $(if $(END),--end $(END))
 
@@ -178,6 +189,7 @@ clean: ## Stop and REMOVE volumes (DESTROYS DATA!)
         backfill-equities backfill-btc-dvol backfill-btc-daily backfill-mstr-holdings \
         backfill-polygon-options backfill-polygon-options-2y \
         backfill-binance-funding backfill-hyperliquid-funding backfill-yieldmax-msty \
+        compute-indicators compute-indicators-recent verify-indicators \
         beat-schedule worker-active telegram-test briefing-preview \
         verify-equities verify-btc-dvol verify-btc-daily verify-mstr-holdings \
         verify-options verify-funding verify-msty-classification verify-runs \

@@ -71,6 +71,33 @@ def ingest_hyperliquid_funding() -> int:
     return HyperliquidFundingIngestor().run(end - DAILY_LOOKBACK, end, mode="daily").rows
 
 
+# ─── Quant indicators (Phase 2 D1) ───────────────────────────────────────
+
+@celery_app.task(name="workers.tasks.compute_indicators_daily")
+def compute_indicators_daily() -> int:
+    """Recompute the trailing window of indicators_daily.
+
+    30-day lookback covers the longest rolling window we use (20d) plus
+    10 days of slack so any late-arriving data (DVOL backfill,
+    distributions ROC) gets reflected.
+    """
+    from scripts.compute_indicators import (
+        compute_indicators,
+        fetch_mstr_shares_outstanding,
+        load_base_data,
+        upsert_indicators,
+    )
+    from core.db import make_sync_engine
+
+    engine = make_sync_engine()
+    start = date.today() - timedelta(days=30)
+    data = load_base_data(engine, start - timedelta(days=40))
+    shares_out = fetch_mstr_shares_outstanding()
+    df = compute_indicators(data, shares_out)
+    df = df.loc[df.index >= start]
+    return upsert_indicators(engine, df)
+
+
 # ─── Briefing (Phase 1: stub; Phase 2: indicator-driven) ─────────────────
 
 @celery_app.task(name="workers.tasks.send_daily_briefing")
