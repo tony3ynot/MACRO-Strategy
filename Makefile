@@ -134,6 +134,9 @@ backfill-polygon-options: ## Backfill MSTR options chain (small slice; pass STAR
 backfill-polygon-options-2y: ## Full 2-year MSTR options backfill (~16h overnight)
 	docker compose exec -T app python -m scripts.backfill_polygon_options --start $$(date -d '2 years ago' '+%Y-%m-%d') --end $$(date '+%Y-%m-%d')
 
+backfill-polygon-options-historical: ## Per-month spot-anchored backfill (fills IV30 gap)
+	docker compose exec -T app python -m scripts.backfill_polygon_options_historical $(if $(START),--start $(START)) $(if $(END),--end $(END))
+
 verify-equities: ## Show equity coverage (counts, date range per ticker)
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
 		-c "SELECT ticker, COUNT(*) AS days, MIN(ts) AS first, MAX(ts) AS last FROM equity_ohlcv GROUP BY ticker ORDER BY ticker;" \
@@ -198,7 +201,7 @@ clean: ## Stop and REMOVE volumes (DESTROYS DATA!)
         migrate migrate-down migrate-status migrate-history \
         seed-calendar \
         backfill-equities backfill-btc-dvol backfill-btc-daily backfill-mstr-holdings \
-        backfill-polygon-options backfill-polygon-options-2y \
+        backfill-polygon-options backfill-polygon-options-2y backfill-polygon-options-historical \
         backfill-binance-funding backfill-hyperliquid-funding backfill-yieldmax-msty \
         compute-indicators compute-indicators-recent verify-indicators \
         compute-mstr-iv compute-mstr-iv-recent verify-mstr-iv \
