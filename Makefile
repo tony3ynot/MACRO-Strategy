@@ -112,6 +112,17 @@ compute-indicators: ## Compute indicators_daily (full history)
 compute-indicators-recent: ## Recompute the last 30 days of indicators_daily
 	docker compose exec -T app python -m scripts.compute_indicators --lookback 30
 
+compute-mstr-iv: ## Compute MSTR IV30 from Polygon options (full Polygon range)
+	docker compose exec -T app python -m scripts.compute_mstr_iv
+
+compute-mstr-iv-recent: ## Recompute the last 30 days of MSTR IV30
+	docker compose exec -T app python -m scripts.compute_mstr_iv --lookback 30
+
+verify-mstr-iv: ## Show MSTR IV30 coverage and IV decomposition (post-D3)
+	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
+		-c "SELECT COUNT(mstr_iv30) AS iv30_days, MIN(date) FILTER (WHERE mstr_iv30 IS NOT NULL) AS first, MAX(date) FILTER (WHERE mstr_iv30 IS NOT NULL) AS last, ROUND(MIN(mstr_iv30)::numeric, 4) AS min_iv, ROUND(AVG(mstr_iv30)::numeric, 4) AS avg_iv, ROUND(MAX(mstr_iv30)::numeric, 4) AS max_iv FROM indicators_daily;" \
+		-c "SELECT date, ROUND(mstr_close::numeric, 2) AS mstr, ROUND(mstr_iv30::numeric, 4) AS mstr_iv, ROUND(mstr_rv20::numeric, 4) AS mstr_rv, ROUND(btc_iv30::numeric, 4) AS btc_iv FROM indicators_daily WHERE mstr_iv30 IS NOT NULL ORDER BY date DESC LIMIT 10;"
+
 verify-indicators: ## Show indicators_daily coverage and recent values
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
 		-c "SELECT COUNT(*) AS rows, MIN(date) AS first, MAX(date) AS last, COUNT(btc_iv30) AS iv30_days, COUNT(btc_vrp) AS vrp_days, COUNT(mnav) AS mnav_days FROM indicators_daily;" \
@@ -190,6 +201,7 @@ clean: ## Stop and REMOVE volumes (DESTROYS DATA!)
         backfill-polygon-options backfill-polygon-options-2y \
         backfill-binance-funding backfill-hyperliquid-funding backfill-yieldmax-msty \
         compute-indicators compute-indicators-recent verify-indicators \
+        compute-mstr-iv compute-mstr-iv-recent verify-mstr-iv \
         beat-schedule worker-active telegram-test briefing-preview \
         verify-equities verify-btc-dvol verify-btc-daily verify-mstr-holdings \
         verify-options verify-funding verify-msty-classification verify-runs \

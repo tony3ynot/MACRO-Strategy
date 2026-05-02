@@ -98,6 +98,27 @@ def compute_indicators_daily() -> int:
     return upsert_indicators(engine, df)
 
 
+@celery_app.task(name="workers.tasks.compute_mstr_iv30_daily")
+def compute_mstr_iv30_daily() -> int:
+    """Recompute the trailing 30 days of MSTR IV30 from Polygon options."""
+    from scripts.compute_mstr_iv import (
+        load_mstr_close,
+        load_options_close,
+        upsert_mstr_iv30,
+    )
+    from quant.indicators.mstr_iv import compute_mstr_iv30_daily as compute
+    from quant.risk_free import fetch_dgs1mo_series
+    from core.db import make_sync_engine
+
+    engine = make_sync_engine()
+    start = date.today() - timedelta(days=30)
+    options = load_options_close(engine, start)
+    mstr_close = load_mstr_close(engine, start)
+    rates = fetch_dgs1mo_series()
+    iv30 = compute(options, mstr_close, rates)
+    return upsert_mstr_iv30(engine, iv30)
+
+
 # ─── Briefing (Phase 1: stub; Phase 2: indicator-driven) ─────────────────
 
 @celery_app.task(name="workers.tasks.send_daily_briefing")

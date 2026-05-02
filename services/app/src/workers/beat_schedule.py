@@ -48,6 +48,10 @@ beat_schedule = {
         "task": "workers.tasks.compute_indicators_daily",
         "schedule": crontab(hour=22, minute=30),  # 1h after equity ingest
     },
+    "compute-mstr-iv30-daily": {
+        "task": "workers.tasks.compute_mstr_iv30_daily",
+        "schedule": crontab(hour=22, minute=45),  # right after compute-indicators
+    },
 
     # ── Output ─────────────────────────────────────────────────────────
     "send-daily-briefing": {
