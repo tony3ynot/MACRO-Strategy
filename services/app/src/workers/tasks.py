@@ -212,7 +212,12 @@ def _build_briefing_body() -> str:
     final_eq = float(res.equity.iloc[-1])
     peak_eq = float(res.equity.cummax().iloc[-1])
     book_dd = (final_eq / peak_eq - 1.0) if peak_eq > 0 else 0.0
-    in_panic = book_dd <= -0.10  # within hysteresis band → panic still active
+
+    # Compare today's weights to a 5-day moving average — large drops signal
+    # the breaker / hedge has fired regardless of which gate triggered.
+    recent_total = res.weights.tail(5).sum(axis=1).mean()
+    today_total = float(today_w.sum())
+    de_risked = today_total < recent_total - 0.10  # ≥10pp gross-exposure drop
 
     def _fmt_w(name: str, w: float, prev: float) -> str:
         diff = w - prev
@@ -230,8 +235,8 @@ def _build_briefing_body() -> str:
             lines.append(_fmt_w(ticker, w, float(prev_w.get(ticker, 0.0))))
     if cash_today > 0.005:
         lines.append(_fmt_w("Cash", cash_today, cash_prev))
-    if in_panic:
-        lines.append("  ⚠ panic mode active (book DD ≤ -10%)")
+    if de_risked:
+        lines.append("  ⚠ de-risked (gross exposure dropped from recent avg)")
 
     def _ind(label: str, value, fmt: str = "{:.4f}", scale: float = 1.0) -> str:
         if pd.isna(value):

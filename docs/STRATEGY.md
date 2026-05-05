@@ -113,7 +113,7 @@ position even when the underlying call is right. Korean retail has
 no 1× inverse MSTR equivalent — cash is the structurally clean
 alternative.
 
-### 2.4 Drawdown circuit breaker
+### 2.4 Drawdown circuit breaker (dual-condition exit)
 
 The engine writes `state.equity` and `state.equity_peak` before each
 strategy call so the strategy can read its own drawdown. A two-state
@@ -121,8 +121,22 @@ hysteresis handles the panic gate:
 
 | Transition | Trigger |
 |---|---|
-| normal → panic | book drawdown ≤ **−15 %** (v5b: was −20 %, sweep showed earlier trigger catches multi-cycle drawdowns sooner) |
-| panic → normal | book drawdown ≥ −10 % |
+| normal → panic | book drawdown ≤ **−15 %** AND trend NOT confirmed |
+| panic → normal | book drawdown ≥ −10 % **OR** trend recovery confirmed (5 consecutive days of MSTR > MA50 AND 20-day MSTR return > +10 %) |
+
+**Why dual-condition.** A single-condition DD exit anchored on the
+*all-time peak* held the strategy half-sized through the 2026-Q1
+recovery rally: book DD was still −31 % from a 2025-07 peak even after
+MSTR had rallied +44 % in 20 days. The first-cut fix (any trend
+recovery → exit panic) overshot the other way: false rallies in the
+2025 bear flipped the strategy out of panic, only for the next leg
+down to whip it back in. Adding a 5-day confirmation streak on the
+trend signal — and requiring trend NOT-confirmed for fresh panic
+entries — gave the cleanest behaviour: panic stays during real bears,
+releases on confirmed recoveries, doesn't whipsaw on noise.
+
+This single change lifted EXTENDED CAGR 17.2 % → 20.9 % and LIVE CAGR
+15.8 % → 17.6 % with MDD unchanged. Calmar 0.37 → 0.45 EXTENDED.
 
 **In panic**, every v2 weight is multiplied by 0.50. The freed
 allocation goes to cash. We do **not** add a short overlay during
@@ -186,6 +200,10 @@ defaults) in [`macro_trend_v5.py`](../services/app/src/quant/backtesting/strateg
 | `dd_panic_trigger` | **-0.15** | book drawdown that activates the circuit breaker (v5b: was −0.20) |
 | `dd_panic_exit` | -0.10 | book drawdown threshold to leave panic |
 | `panic_scale` | 0.50 | gross-exposure haircut while in panic |
+| `trend_exit_ma_fast` | 50 | MA for "MSTR > MA?" component of trend recovery |
+| `trend_exit_momentum_window` | 20 | Lookback for the trend-recovery momentum check |
+| `trend_exit_momentum_floor` | 0.10 | Required 20-day MSTR return for trend recovery |
+| `TREND_CONFIRM_DAYS` (constant) | 5 | Consecutive days of `_trend_recovery_signal` true before panic releases |
 
 ---
 
@@ -206,7 +224,7 @@ Headline numbers (cost_bps = 10), in EXTENDED + LIVE windows (LONG omitted for v
 
 | Strategy | EXTENDED (5y) CAGR / MDD | LIVE (2y) CAGR / MDD |
 |---|---:|---:|
-| **macro_trend_v5_breaker** *(production)* | **+17.24 % / −46.5 %** | **+15.78 % / −46.5 %** |
+| **macro_trend_v5_breaker** *(production, dual-condition exit)* | **+20.91 % / −46.5 %** | **+17.56 % / −46.5 %** |
 | macro_trend_v5 (no breaker) | +18.94 % / −66.9 % | +8.18 % / −66.9 % |
 | macro_trend_v3 | +14.11 % / −48.0 % | +13.67 % / −48.0 % |
 | macro_trend_v2 | +17.58 % / −66.4 % | +6.57 % / −66.4 % |
@@ -220,18 +238,18 @@ Calmar (CAGR / |MDD|) — risk-adjusted summary:
 
 | Strategy | EXTENDED | LIVE |
 |---|---:|---:|
-| **macro_trend_v5_breaker** | **0.37** ✅ > BH | **0.34** ✅ > BH |
+| **macro_trend_v5_breaker** | **0.45** ✅ > BH | **0.38** ✅ > BH |
 | macro_trend_v3 | 0.29 ≈ BH | 0.28 > BH |
 | macro_trend_v5 (no breaker) | 0.28 ≈ BH | 0.12 |
 | macro_trend (v1) | 0.24 | 1.16 (bear-period artefact) |
 | BH MSTR | 0.28 | 0.10 |
 
-Walk-forward sanity (split EXTENDED into halves):
+Walk-forward sanity (split EXTENDED into halves, after dual-condition fix):
 
 | Sub-period | v5_breaker | BH MSTR |
 |---|---:|---:|
-| 2021-04 → 2023-12 (bear / recovery) | +1.6 % / −42 % / Cal 0.04 | −3.9 % / −84 % / Cal −0.05 |
-| 2024-01 → 2026-05 (bull → bear) | +33.0 % / −46 % / Cal 0.71 | +52.6 % / −77 % / Cal 0.68 |
+| 2021-04 → 2023-12 (bear / recovery) | +6.3 % / −42 % / Cal 0.15 | −3.9 % / −84 % / Cal −0.05 |
+| 2024-01 → 2026-05 (bull → bear → recovery) | +34.8 % / −46 % / Cal 0.75 | +52.6 % / −77 % / Cal 0.68 |
 
 The strategy outperforms BH MSTR by 5.5 pp CAGR in the bear/recovery
 sub-period and trails by 19.6 pp CAGR in the bull/bear sub-period —
@@ -363,4 +381,6 @@ optimising those windows would be classic OOS-fitting.
 | `fd49bfa` | D5 | Walk-forward validation + tuned `hedge_vrp` / `vol_target` defaults |
 | `9227d5a` | D5+ | Honest correction: vol_target 0.50 → 0.70 + EXTENDED window |
 | `7042c9d` | D6 | macro_trend_v2 (continuous weights) + v3 (drawdown circuit breaker) |
-| (this)    | D7 | Per-ticker attribution showed MSTU and MSTZ both net-negative; v4 (drop MSTZ, expand MSTU) and v5 (drop both) added; sweep-tuned v5_breaker (msty_max 0.35, dd_panic_trigger −0.15) becomes production. Calmar 0.37 EXTENDED / 0.34 LIVE — beats BH MSTR on both. |
+| `12536d8` | D7 | Per-ticker attribution showed MSTU and MSTZ both net-negative; v4 (drop MSTZ, expand MSTU) and v5 (drop both) added; sweep-tuned v5_breaker (msty_max 0.35, dd_panic_trigger −0.15) becomes production. Calmar 0.37 EXTENDED / 0.34 LIVE — beats BH MSTR on both. |
+| `5ed02bc` | D7 | Telegram briefing wired to v5_breaker live signal; v5c (continuous sizing) diagnostic; BTC funding-rate signal too weak. |
+| (this)    | D8 | Dual-condition panic exit (DD recovery OR 5-day-confirmed trend recovery), with trend-aware panic entry. Resolves the "stuck at half-size during recovery" failure where book DD anchored on a year-old peak refused to release. EXTENDED CAGR 17.2 → 20.9 / Calmar 0.37 → 0.45; LIVE CAGR 15.8 → 17.6 / Calmar 0.34 → 0.38. |

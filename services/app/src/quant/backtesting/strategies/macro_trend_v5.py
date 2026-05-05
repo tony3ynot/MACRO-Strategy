@@ -127,16 +127,75 @@ def make_macro_trend_v5_with_breaker(
                                         # multi-cycle drawdowns sooner (+5 pp EXT, +0.7 pp LIVE).
     dd_panic_exit: float = -0.10,
     panic_scale: float = 0.50,
+    trend_exit_ma_fast: int = 50,
+    trend_exit_momentum_window: int = 20,
+    trend_exit_momentum_floor: float = 0.10,
 ):
+    """v5_breaker with dual-condition panic exit.
+
+    The original single-condition exit (book DD ≥ -10 %) anchored on
+    *all-time* peak.  After a year-long bear the peak is ancient history
+    and a real recovery rally can take MSTR up 50 %+ from its low while
+    the book DD is still around -25 % — i.e. the strategy stays half-
+    sized through the entire bounce.  This was observed live on
+    2026-05-04: MSTR +44 % over 20 days from the local low, MSTR > MA50
+    by 28 %, but the book had peaked in 2025-07 and was still -31 %
+    underwater, so panic refused to release.
+
+    Fix: leave panic when **either**
+      • book DD has recovered to the −10 % band (original rule), **OR**
+      • a fresh uptrend has confirmed (MSTR > MA50 AND 20d MSTR return
+        > +10 %).
+
+    Whipsaw concern: if a relief rally fails, momentum will fall back
+    and DD will deepen, re-tripping the entry condition.  Re-entering
+    panic on the next dip is the right behaviour, not a bug — we want
+    to ride confirmed recoveries and re-de-risk on confirmed continuations.
+    """
     base = make_macro_trend_v5(params)
-    holder = {"panic": False}
+    holder = {"panic": False, "trend_streak": 0}
+    TREND_CONFIRM_DAYS = 5
+
+    def _trend_recovery_signal(state, idx) -> bool:
+        if not state.has("MSTR", idx, "close"):
+            return False
+        try:
+            price = state.price("MSTR", idx)
+            ma_fast = state.indicator("MSTR", idx, f"MA{trend_exit_ma_fast}")
+        except Exception:
+            return False
+        if ma_fast is None or price <= ma_fast:
+            return False
+        if idx < trend_exit_momentum_window:
+            return False
+        if not state.has("MSTR", idx - trend_exit_momentum_window, "close"):
+            return False
+        past = state.price("MSTR", idx - trend_exit_momentum_window)
+        if past <= 0:
+            return False
+        momentum = price / past - 1.0
+        return momentum > trend_exit_momentum_floor
 
     def strat(state, idx):
         dd = state.drawdown
-        if not holder["panic"] and dd <= dd_panic_trigger:
-            holder["panic"] = True
-        elif holder["panic"] and dd >= dd_panic_exit:
-            holder["panic"] = False
+        trend_ok = _trend_recovery_signal(state, idx)
+        # Streak counter: how many consecutive days has trend been recovering?
+        if trend_ok:
+            holder["trend_streak"] += 1
+        else:
+            holder["trend_streak"] = 0
+        trend_confirmed = holder["trend_streak"] >= TREND_CONFIRM_DAYS
+
+        if not holder["panic"]:
+            # Enter panic on drawdown only if trend is NOT confirmed.
+            # A confirmed uptrend overrides drawdown anchor (avoids the
+            # whipsaw where dd is anchored to a year-old peak).
+            if dd <= dd_panic_trigger and not trend_confirmed:
+                holder["panic"] = True
+        else:
+            dd_ok = dd >= dd_panic_exit
+            if dd_ok or trend_confirmed:
+                holder["panic"] = False
 
         weights = base(state, idx) or {}
         if holder["panic"]:

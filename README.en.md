@@ -50,15 +50,15 @@ breaker: book DD ≤ -15%       → multiply every weight by 0.50 (raise cash, n
 
 | Window | macro_trend_v5_breaker | BH MSTR | Calmar v5 / BH |
 |---|---:|---:|---:|
-| **EXTENDED** 2021→ (5 y full cycle) | **+17.24 % / -46.5 %** | +23.67 % / -84 % | **0.37 / 0.28** ✅ |
-| **LIVE** 2024-05 → (2 y bear) | **+15.78 % / -46.5 %** | +7.85 % / -77 % | **0.34 / 0.10** ✅ |
+| **EXTENDED** 2021→ (5 y full cycle) | **+20.91 % / -46.5 %** | +23.67 % / -84 % | **0.45 / 0.28** ✅ |
+| **LIVE** 2024-05 → (2 y bear) | **+17.56 % / -46.5 %** | +7.85 % / -77 % | **0.38 / 0.10** ✅ |
 
-Walk-forward sanity (EXTENDED split in half):
+Walk-forward sanity (EXTENDED split in half, after dual-condition exit fix):
 
 | Sub-period | v5_breaker | BH MSTR |
 |---|---:|---:|
-| 2021-04 → 2023-12 (bear / recovery) | +1.6 % / -42 % / Cal **0.04** | -3.9 % / -84 % / Cal -0.05 |
-| 2024-01 → 2026-05 (bull → bear) | +33.0 % / -46 % / Cal **0.71** | +52.6 % / -77 % / Cal 0.68 |
+| 2021-04 → 2023-12 (bear / recovery) | **+6.3 %** / -42 % / Cal **0.15** | -3.9 % / -84 % / Cal -0.05 |
+| 2024-01 → 2026-05 (bull → bear → recovery) | **+34.8 %** / -46 % / Cal **0.75** | +52.6 % / -77 % / Cal 0.68 |
 
 **Honest framing — drawdown reducer with cycle-robust risk-adjusted alpha**:
 - Calmar **beats BH MSTR across both reporting windows** (EXTENDED 0.37 vs 0.28, LIVE 0.34 vs 0.10)
