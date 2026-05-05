@@ -5,7 +5,7 @@
 
 ### Market-Adaptive Covered-call Regime Optimizer
 
-![Status](https://img.shields.io/badge/status-Phase_1_Foundation-orange)
+![Status](https://img.shields.io/badge/status-Phase_2_Validated-brightgreen)
 ![Stack](https://img.shields.io/badge/stack-FastAPI%20%7C%20TimescaleDB%20%7C%20Celery-blue)
 ![Data](https://img.shields.io/badge/data-yfinance%20%7C%20Polygon%20%7C%20Deribit%20%7C%20Hyperliquid-success)
 ![Cost](https://img.shields.io/badge/monthly_cost-%240-brightgreen)
@@ -29,17 +29,32 @@
 
 ---
 
-## Strategy Architecture — 4-State Regime Model
+## Strategy Architecture — 4-State Allocator
 
-| Regime | Trigger | Core | Up Overlay | Down Overlay |
-|---|---|---|---|---|
-| **Harvest** | IV − RV > 15% & sideways | MSTY 70-100% | — | — |
-| **Trend** | BTC breakout & NAV stable | MSTR 70-100% | MSTU ≤25%, ≤5d | — |
-| **Value** | mNAV < 1.0 | MSTR 100% | — | — |
-| **Risk-off** | BTC support break + IV spike | Cash 75-100% | — | MSTZ ≤25%, ≤3d |
+배포된 allocator는 매일 다음 4 state 중 하나로 자본을 배분합니다.
+정식 사양: [`docs/STRATEGY.md`](docs/STRATEGY.md).
 
-**Hard constraint**: Core (MSTR + MSTY) 상시 ≥70%. Overlay 자산은 합쳐서 ≤30%.
-레버리지 ETF의 daily-reset 변동성 드래그를 5개 운영 규칙으로 봉쇄 — 자세히는 [Risk Management](#risk-management) 참조.
+| State | Trigger (요약) | Allocation |
+|---|---|---|
+| **ACCUMULATE** | MSTR > MA50 > MA200 (uptrend) 또는 얕은 조정 | MSTR/MSTU 동적 leverage (vol-target 0.5 + mNAV overlay) |
+| **HARVEST** | BTC IV>40% **AND** VRP>+3% **AND** BTC RV<50% **AND** MSTR이 MA200 ±10% 횡보 | **MSTY 100%** (옵션 프리미엄 수확) |
+| **HEDGE** | MSTR < MA50 < MA200 **AND** VRP ≤ 0 | **MSTZ 100%** (vol chaos에 비대칭 페이오프) |
+| **WAIT** | MA200 아래지만 panic 아님 | **Cash 100%** (no edge available) |
+
+전이는 leveraged side(ACCUMULATE/HEDGE)로 들어갈 때 **2일 confirmation**, de-risking(HARVEST/WAIT)은 즉시 — whipsaw vs edge-loss 균형.
+
+### Validation (Phase 2 D5, 2024-05 → 2026-05 LIVE)
+
+| 전략 | CAGR | MDD | Calmar | Sharpe |
+|---|---:|---:|---:|---:|
+| **macro_trend (이 spec)** | **+36.07%** | **-33.05%** | **1.09** | 0.84 |
+| BH MSTR | +7.85% | -77.42% | 0.10 | 0.51 |
+| BH MSTY | +4.42% | -71.79% | 0.06 | 0.40 |
+| BH MSTU | -57.27% | -98.58% | — | 0.32 |
+
+- TEST window (약세장 12개월) 단독 실행 시 MSTR 대비 **+59pp alpha** — defensive 본분 작동
+- Cost stress 25 bps에서도 **+20pp alpha 유지** — 거래비용 robust
+- 자세한 walk-forward / parameter sensitivity 결과는 [`docs/STRATEGY.md §6`](docs/STRATEGY.md#6-validation-phase-2-d5)
 
 ---
 
@@ -143,21 +158,31 @@ graph LR
 ```
 MACRO-Strategy/
 ├── docker-compose.yml          # core: postgres, redis, app, worker
-├── docker-compose.jupyter.yml  # opt-in research env
-├── Makefile                    # ops shortcuts
+├── docker-compose.jupyter.yml  # opt-in research env (jupyter only)
+├── Makefile                    # ops shortcuts (verify-*, backtest, walk-forward, …)
+├── docs/
+│   └── STRATEGY.md             # formal allocator spec (priority over README)
 ├── services/
 │   ├── postgres/init/          # extensions + bootstrap SQL
 │   └── app/
 │       ├── Dockerfile
 │       ├── requirements.txt
+│       ├── migrations/         # alembic 005: initial → indicators_daily
 │       └── src/
-│           ├── api/            # FastAPI (health, regime, indicators)
-│           ├── core/           # config, db, ingestor base, rate limiter
-│           ├── connectors/     # yfinance / deribit / polygon / hyperliquid
+│           ├── api/            # FastAPI (health endpoint)
+│           ├── core/           # config, db, ingestor base, rate limiter, telegram
+│           ├── connectors/     # yfinance / deribit / coinbase / polygon /
+│           │                   # binance / hyperliquid / sec_edgar / yieldmax
 │           ├── workers/        # celery tasks + beat schedule
-│           ├── quant/          # indicators, decomposition, regime, backtest
-│           └── alerts/         # telegram, daily briefing
-├── migrations/                 # alembic versions
+│           ├── quant/
+│           │   ├── indicators/   # realized_vol, btc_vrp, mnav, mstr_iv,
+│           │   │                 # iv_decomposition
+│           │   ├── backtesting/  # engine, data, strategies (macro_trend,
+│           │   │                 # macro_regime, benchmarks)
+│           │   ├── blackscholes.py    # BS pricer + IV inversion
+│           │   └── risk_free.py       # FRED DGS1MO fetch
+│           └── scripts/        # backfill_*, compute_*, run_backtest,
+│                               # walk_forward_validation
 └── research/notebooks/         # jupyter (read-only DB role)
 ```
 
@@ -165,14 +190,14 @@ MACRO-Strategy/
 
 ## Roadmap
 
-| Phase | Duration | Status | Deliverable |
-|---|---|---|---|
-| **1. Foundation** | 2 weeks | **▶ In Progress** | Docker stack, schema, 7 ingestors backfilled |
-| **2. Quant Core** | 2-3 weeks | ☐ Planned | Indicators, IV decomposition, β A/B, Kalman, 4-state classifier |
-| **3. Backtest Engine** | 2-3 weeks | ☐ Planned | Leveraged-ETF decay model, distribution reinvestment, walk-forward OOS |
-| **4. Signal & Alert** | 1-2 weeks | ☐ Planned | Telegram bot, regime transition push, 9AM daily briefing |
-| **5. Dashboard** | 2 weeks | ☐ Planned | Next.js mobile-first, Orval typed client |
-| **6. Deployment** | 1 week | ☐ Planned | Oracle Cloud ARM, Cloudflare Tunnel, daily DB snapshot to S3-compatible |
+| Phase | Status | Deliverable |
+|---|---|---|
+| **1. Foundation** | ✅ Done | Docker stack, schema, 7 ingestors backfilled (MSTR/MSTU/MSTY/MSTZ, BTC daily/DVOL, MSTR holdings, Binance/Hyperliquid funding, YieldMax ROC, Polygon options 2y) |
+| **2. Quant Core** | ✅ Done | indicators_daily (RV/IV/VRP/mNAV/β/EquityPremium), per-month historical Polygon backfill, 4-state allocator, walk-forward OOS validation, parameter robustness |
+| **3. Live Signal** | ▶ Next | Telegram daily briefing populated with current state + recommended allocation, regime-transition push |
+| **4. Dashboard** | ☐ Planned | Next.js mobile-first read-only dashboard |
+| **5. Deployment** | ☐ Planned | Oracle Cloud ARM (free tier), Cloudflare Tunnel, daily DB snapshot |
+| **2.5 backlog** | ☐ Planned | SEC 10-Q shares-out scraper (mNAV), Kalman β smoother, K-means regime classifier upgrade |
 
 ---
 
@@ -187,43 +212,28 @@ make help                # 모든 타깃 리스트
 
 | Command | Effect |
 |---|---|
-| `make up` | core 4 서비스 시작 (postgres / redis / app / worker) |
+| `make up` / `make down` | core 4 서비스 시작 / 정지 (데이터 보존) |
 | `make jupyter-up` | 추가로 Jupyter (:8888) — research env |
-| `make logs` / `make logs-app` | 전체 / app 로그 tail |
-| `make shell-pg` | psql REPL |
-| `make verify-tsdb` | TimescaleDB extension 확인 |
-| `make down` | 정지 (데이터 보존) |
+| `make logs` / `make shell-pg` | 로그 tail / psql REPL |
+| `make verify-indicators` / `verify-mstr-iv` / `verify-iv-decomp` | indicator 커버리지 점검 |
+| `make backtest` / `backtest-stress` / `walk-forward` | Phase 2 검증 재실행 |
 | `make clean` | 정지 + volume 삭제 (확인 프롬프트 — DB 데이터 영구 삭제) |
 
 ---
 
 ## Risk Management
 
-레버리지 ETF의 daily-reset 변동성 드래그를 운영 규칙으로 봉쇄.
-**자유 재량 금지** — 모든 진입·청산은 사전 정의된 게이트.
+자유 재량 금지 — 모든 진입·청산은 사전 정의된 게이트와 vol-target 사이징으로 결정.
 
-### MSTU (2x long, Trend regime)
-
-| 항목 | 룰 |
+| 메커니즘 | 작동 방식 |
 |---|---|
-| 진입 게이트 (모두 통과) | BTC funding ≤ 0 **AND** BTC IV30 < 30D 평균 **AND** mNAV < 1.5x |
-| 비중 캡 | portfolio의 ≤ 25% |
-| 보유 기간 | ≤ 5 trading days, 이후 자동으로 MSTR로 rollover |
+| **Vol targeting (Hurst-Ooi-Pedersen 2017)** | ACCUMULATE leverage = clamp(0.50 / MSTR_RV20, 0.5×, 2.0×) — RV가 높을수록 leverage 자동 축소 |
+| **Overheat de-risk** | MSTR이 MA200 대비 +10% 이상 → leverage ≤ 1.0×, +20% 이상 → ≤ 0.5× |
+| **mNAV cap** | mNAV ≥ 1.5 (50%+ premium) → MSTU 비중 0, MSTR-only |
+| **Hysteresis** | risk-on(ACCUMULATE/HEDGE)으로 들어갈 땐 2일 confirmation; de-risking은 즉시 |
+| **HARVEST narrow gate** | 4중 AND 조건 — IV>40% **AND** VRP>3% **AND** RV<50% **AND** MSTR이 MA200 ±10% — 좁은 vol-seller window만 진입 |
 
-### MSTZ (-2x inverse, Risk-off regime) — 5 규칙
-
-| # | 규칙 | 이유 |
-|---|---|---|
-| 1 | 보유 ≤3 trading days (hard stop) | daily 리셋 decay는 보유일에 비례 |
-| 2 | 다중 트리거 진입 (≥3 게이트 동시) | 단일 시그널 false-positive가 decay에 잡힘 |
-| 3 | 단계적 entry (33/33/34, 3일 분할) | whipsaw 보호, 첫 false 시그널은 1/3만 노출 |
-| 4 | Vol-aware 사이징: `alloc = base × (1 − norm_RV20)` | RV가 decay의 twin — 높을수록 비중 자동 축소 |
-| 5 | MSTR -10%에서 50% 즉시 익절 | 반등에서 mean-reversion에 잡히기 전에 확정 |
-
-### Core 자산 (MSTR + MSTY)
-
-항상 portfolio의 **≥ 70%** 점유. Overlay는 *enhancement*이지 bet-the-farm 아님.
-Phase 3 backtest에서 (Core only) vs (Core + Overlay) A/B 후 OOS Sharpe 우월할 때만 Overlay production 채택.
+각 게이트의 임계값과 D5 walk-forward 검증 결과는 [`docs/STRATEGY.md §3-§6`](docs/STRATEGY.md#3-per-state-allocation) 참조.
 
 ---
 

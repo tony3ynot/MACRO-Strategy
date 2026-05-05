@@ -5,7 +5,7 @@
 
 ### Market-Adaptive Covered-call Regime Optimizer
 
-![Status](https://img.shields.io/badge/status-Phase_1_Foundation-orange)
+![Status](https://img.shields.io/badge/status-Phase_2_Validated-brightgreen)
 ![Stack](https://img.shields.io/badge/stack-FastAPI%20%7C%20TimescaleDB%20%7C%20Celery-blue)
 ![Data](https://img.shields.io/badge/data-yfinance%20%7C%20Polygon%20%7C%20Deribit%20%7C%20Hyperliquid-success)
 ![Cost](https://img.shields.io/badge/monthly_cost-%240-brightgreen)
@@ -29,17 +29,34 @@ The alpha source is not asset selection — it is **rotation timing**.
 
 ---
 
-## Strategy Architecture — 4-State Regime Model
+## Strategy Architecture — 4-State Allocator
 
-| Regime | Trigger | Core | Up Overlay | Down Overlay |
-|---|---|---|---|---|
-| **Harvest** | IV − RV > 15% & sideways | MSTY 70-100% | — | — |
-| **Trend** | BTC breakout & NAV stable | MSTR 70-100% | MSTU ≤25%, ≤5d | — |
-| **Value** | mNAV < 1.0 | MSTR 100% | — | — |
-| **Risk-off** | BTC support break + IV spike | Cash 75-100% | — | MSTZ ≤25%, ≤3d |
+The deployed allocator picks one of four states each day.
+Formal spec: [`docs/STRATEGY.md`](docs/STRATEGY.md).
 
-**Hard constraint**: Core (MSTR + MSTY) maintained at ≥70% at all times. Overlay assets combined ≤30%.
-Daily-reset volatility drag of leveraged ETFs is contained by 5 operational rules — see [Risk Management](#risk-management).
+| State | Trigger (summary) | Allocation |
+|---|---|---|
+| **ACCUMULATE** | MSTR > MA50 > MA200 (uptrend) or shallow pullback | MSTR / MSTU dynamic leverage (vol-target 0.5 + mNAV overlay) |
+| **HARVEST** | BTC IV>40% **AND** VRP>+3% **AND** BTC RV<50% **AND** MSTR within ±10% of MA200 | **MSTY 100%** (premium harvest) |
+| **HEDGE** | MSTR < MA50 < MA200 **AND** VRP ≤ 0 | **MSTZ 100%** (asymmetric payoff in vol chaos) |
+| **WAIT** | below MA200 but no panic | **Cash 100%** (no edge available) |
+
+Risk-on transitions (ACCUMULATE / HEDGE) require **2-day confirmation**;
+de-risking transitions (HARVEST / WAIT) are instant — balancing whipsaw
+suppression against edge-loss risk.
+
+### Validation (Phase 2 D5, LIVE 2024-05 → 2026-05)
+
+| Strategy | CAGR | MDD | Calmar | Sharpe |
+|---|---:|---:|---:|---:|
+| **macro_trend (this spec)** | **+36.07%** | **-33.05%** | **1.09** | 0.84 |
+| BH MSTR | +7.85% | -77.42% | 0.10 | 0.51 |
+| BH MSTY | +4.42% | -71.79% | 0.06 | 0.40 |
+| BH MSTU | -57.27% | -98.58% | — | 0.32 |
+
+- TEST window (12-month bear) alone: **+59 pp alpha vs MSTR** — defensive design works
+- Cost stress at 25 bps: still **+20 pp alpha** — robust to realistic spreads
+- Walk-forward and parameter-sensitivity details: [`docs/STRATEGY.md §6`](docs/STRATEGY.md#6-validation-phase-2-d5)
 
 ---
 
@@ -145,21 +162,31 @@ graph LR
 ```
 MACRO-Strategy/
 ├── docker-compose.yml          # core: postgres, redis, app, worker
-├── docker-compose.jupyter.yml  # opt-in research env
-├── Makefile                    # ops shortcuts
+├── docker-compose.jupyter.yml  # opt-in research env (jupyter only)
+├── Makefile                    # ops shortcuts (verify-*, backtest, walk-forward, …)
+├── docs/
+│   └── STRATEGY.md             # formal allocator spec (priority over README)
 ├── services/
 │   ├── postgres/init/          # extensions + bootstrap SQL
 │   └── app/
 │       ├── Dockerfile
 │       ├── requirements.txt
+│       ├── migrations/         # alembic 005: initial → indicators_daily
 │       └── src/
-│           ├── api/            # FastAPI (health, regime, indicators)
-│           ├── core/           # config, db, ingestor base, rate limiter
-│           ├── connectors/     # yfinance / deribit / polygon / hyperliquid
+│           ├── api/            # FastAPI (health endpoint)
+│           ├── core/           # config, db, ingestor base, rate limiter, telegram
+│           ├── connectors/     # yfinance / deribit / coinbase / polygon /
+│           │                   # binance / hyperliquid / sec_edgar / yieldmax
 │           ├── workers/        # celery tasks + beat schedule
-│           ├── quant/          # indicators, decomposition, regime, backtest
-│           └── alerts/         # telegram, daily briefing
-├── migrations/                 # alembic versions
+│           ├── quant/
+│           │   ├── indicators/   # realized_vol, btc_vrp, mnav, mstr_iv,
+│           │   │                 # iv_decomposition
+│           │   ├── backtesting/  # engine, data, strategies (macro_trend,
+│           │   │                 # macro_regime, benchmarks)
+│           │   ├── blackscholes.py    # BS pricer + IV inversion
+│           │   └── risk_free.py       # FRED DGS1MO fetch
+│           └── scripts/        # backfill_*, compute_*, run_backtest,
+│                               # walk_forward_validation
 └── research/notebooks/         # jupyter (read-only DB role)
 ```
 
@@ -167,16 +194,14 @@ MACRO-Strategy/
 
 ## Roadmap
 
-| Phase | Duration | Status | Deliverable |
-|---|---|---|---|
-| **1. Foundation** | 2 weeks | **▶ In Progress** | Docker stack, schema, 7 ingestors backfilled |
-| **2. Quant Core** | 2-3 weeks | ☐ Planned | Indicators, IV decomposition, β A/B, Kalman, 4-state classifier |
-| **3. Backtest Engine** | 2-3 weeks | ☐ Planned | Leveraged-ETF decay model, distribution reinvestment, walk-forward OOS |
-| **4. Signal & Alert** | 1-2 weeks | ☐ Planned | Telegram bot, regime transition push, 9AM daily briefing |
-| **5. Dashboard** | 2 weeks | ☐ Planned | Next.js mobile-first, Orval typed client |
-| **6. Deployment** | 1 week | ☐ Planned | Oracle Cloud ARM, Cloudflare Tunnel, daily DB snapshot to S3-compatible |
-
-Total **9-12 weeks**, solo developer baseline.
+| Phase | Status | Deliverable |
+|---|---|---|
+| **1. Foundation** | ✅ Done | Docker stack, schema, 7 ingestors backfilled (MSTR/MSTU/MSTY/MSTZ, BTC daily/DVOL, MSTR holdings, Binance/Hyperliquid funding, YieldMax ROC, Polygon options 2y) |
+| **2. Quant Core** | ✅ Done | indicators_daily (RV/IV/VRP/mNAV/β/EquityPremium), per-month historical Polygon backfill, 4-state allocator, walk-forward OOS validation, parameter robustness |
+| **3. Live Signal** | ▶ Next | Telegram daily briefing populated with current state + recommended allocation, regime-transition push |
+| **4. Dashboard** | ☐ Planned | Next.js mobile-first read-only dashboard |
+| **5. Deployment** | ☐ Planned | Oracle Cloud ARM (free tier), Cloudflare Tunnel, daily DB snapshot |
+| **2.5 backlog** | ☐ Planned | SEC 10-Q shares-out scraper (mNAV), Kalman β smoother, K-means regime classifier upgrade |
 
 ---
 
@@ -191,40 +216,29 @@ make help                # List all targets
 
 | Command | Effect |
 |---|---|
-| `make up` | Start core 4 services (postgres / redis / app / worker) |
+| `make up` / `make down` | Start / stop core 4 services (data preserved on down) |
 | `make jupyter-up` | Add Jupyter (:8888) — research env |
-| `make logs` / `make logs-app` | Tail all / app logs |
-| `make shell-pg` | psql REPL |
-| `make migrate` | Apply pending alembic migrations |
-| `make seed-calendar` | Seed market_calendar (NYSE + crypto, 2017-2030) |
-| `make verify-tsdb` | Verify TimescaleDB extension |
-| `make down` | Stop (data preserved) |
+| `make logs` / `make shell-pg` | Tail logs / psql REPL |
+| `make verify-indicators` / `verify-mstr-iv` / `verify-iv-decomp` | Indicator coverage check |
+| `make backtest` / `backtest-stress` / `walk-forward` | Re-run Phase 2 validation |
 | `make clean` | Stop + remove volumes (confirms — permanent DB data loss) |
 
 ---
 
 ## Risk Management
 
-Daily-reset volatility drag of leveraged ETFs is contained by operational rules.
-**No discretion** — every entry and exit is a pre-defined gate.
+No discretion — every entry/exit is a pre-defined gate or vol-target sizing rule.
 
-### MSTU (2x long, Trend regime)
-
-| Item | Rule |
+| Mechanism | Behaviour |
 |---|---|
-| Entry gates (all required) | BTC funding ≤ 0 **AND** BTC IV30 < 30D average **AND** mNAV < 1.5x |
-| Position cap | ≤ 25% of portfolio |
-| Holding period | ≤ 5 trading days, then auto-rollover to MSTR |
+| **Vol targeting (Hurst-Ooi-Pedersen 2017)** | ACCUMULATE leverage = clamp(0.50 / MSTR_RV20, 0.5×, 2.0×) — leverage shrinks automatically as realised vol rises |
+| **Overheat de-risk** | MSTR > MA200 by +10% → leverage capped at 1.0×; +20% → capped at 0.5× |
+| **mNAV cap** | mNAV ≥ 1.5 (50%+ premium) → MSTU weight forced to 0, MSTR-only |
+| **Hysteresis** | Risk-on transitions (ACCUMULATE/HEDGE) require 2-day confirmation; de-risking is instant |
+| **HARVEST narrow gate** | 4-condition AND — IV>40% **AND** VRP>3% **AND** RV<50% **AND** MSTR within ±10% of MA200 — only enters narrow vol-seller windows |
 
-### MSTZ (-2x inverse, Risk-off regime) — 5 Rules
-
-| # | Rule | Reason |
-|---|---|---|
-| 1 | Hold ≤3 trading days (hard stop) | Daily-reset decay accumulates with holding period |
-| 2 | Multi-trigger entry (≥3 gates simultaneously) | Single-signal false-positives get eaten by decay |
-| 3 | Phased entry (33/33/34 over 3 days) | Whipsaw protection — first false signal exposes only 1/3 |
-| 4 | Vol-aware sizing: `alloc = base × (1 − norm_RV20)` | RV is decay's twin — higher RV → smaller position |
-| 5 | At MSTR -10%, immediately close 50% | Lock in profit before mean-reversion catches the rebound |
+Every threshold and the D5 walk-forward validation behind it is in
+[`docs/STRATEGY.md §3-§6`](docs/STRATEGY.md#3-per-state-allocation).
 
 ### Core Asset (MSTR + MSTY)
 
