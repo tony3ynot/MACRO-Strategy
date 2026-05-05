@@ -47,9 +47,19 @@ def _daily_drag(annual_bps: float) -> float:
 
 
 def load_real_prices(engine: Engine) -> pd.DataFrame:
-    """Wide DataFrame: date × ticker, daily close, real data only."""
+    """Wide DataFrame: date × ticker, daily *adjusted* close.
+
+    We use `adj_close` so the series is total-return: each row is what
+    a buy-and-hold with reinvested distributions would mark to. This
+    matters enormously for MSTY (~80 % distribution yield); on
+    MSTR/MSTU/MSTZ the adjustment is a no-op.
+
+    Using adj_close also makes technical indicators (MA50/MA200)
+    continuous through ex-dividend dates rather than stair-stepping
+    downward each Thursday.
+    """
     sql = text(f"""
-        SELECT ts AS date, ticker, close
+        SELECT ts AS date, ticker, adj_close
         FROM equity_ohlcv
         WHERE ticker IN ({",".join(f"'{t}'" for t in REAL_TICKERS)})
         ORDER BY date
@@ -57,7 +67,7 @@ def load_real_prices(engine: Engine) -> pd.DataFrame:
     with engine.connect() as conn:
         df = pd.read_sql(sql, conn)
     df["date"] = pd.to_datetime(df["date"])
-    return df.pivot(index="date", columns="ticker", values="close").astype(float)
+    return df.pivot(index="date", columns="ticker", values="adj_close").astype(float)
 
 
 def synthesise_leveraged(
