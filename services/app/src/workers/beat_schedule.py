@@ -52,6 +52,10 @@ beat_schedule = {
         "task": "workers.tasks.compute_mstr_iv30_daily",
         "schedule": crontab(hour=22, minute=45),  # right after compute-indicators
     },
+    "compute-iv-decomposition": {
+        "task": "workers.tasks.compute_iv_decomposition",
+        "schedule": crontab(hour=23, minute=0),   # right after MSTR IV30 lands
+    },
 
     # ── Output ─────────────────────────────────────────────────────────
     "send-daily-briefing": {

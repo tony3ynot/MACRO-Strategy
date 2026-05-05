@@ -118,6 +118,14 @@ compute-mstr-iv: ## Compute MSTR IV30 from Polygon options (full Polygon range)
 compute-mstr-iv-recent: ## Recompute the last 30 days of MSTR IV30
 	docker compose exec -T app python -m scripts.compute_mstr_iv --lookback 30
 
+compute-iv-decomp: ## Fit β(t) + EquityPremium(t) from MSTR/BTC IV30
+	docker compose exec -T app python -m scripts.compute_iv_decomposition
+
+verify-iv-decomp: ## Show β / EquityPremium fit + recent values
+	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
+		-c "SELECT COUNT(beta_iv) AS fit_days, ROUND(MIN(beta_iv)::numeric, 3) AS min_b, ROUND(AVG(beta_iv)::numeric, 3) AS avg_b, ROUND(MAX(beta_iv)::numeric, 3) AS max_b, ROUND(MIN(equity_premium)::numeric, 4) AS min_ep, ROUND(AVG(equity_premium)::numeric, 4) AS avg_ep, ROUND(MAX(equity_premium)::numeric, 4) AS max_ep FROM indicators_daily WHERE beta_iv IS NOT NULL;" \
+		-c "SELECT date, ROUND(mstr_iv30::numeric, 4) AS mstr_iv, ROUND(btc_iv30::numeric, 4) AS btc_iv, ROUND(beta_iv::numeric, 3) AS beta, ROUND(equity_premium::numeric, 4) AS eq_prem FROM indicators_daily WHERE beta_iv IS NOT NULL ORDER BY date DESC LIMIT 10;"
+
 verify-mstr-iv: ## Show MSTR IV30 coverage and IV decomposition (post-D3)
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
 		-c "SELECT COUNT(mstr_iv30) AS iv30_days, MIN(date) FILTER (WHERE mstr_iv30 IS NOT NULL) AS first, MAX(date) FILTER (WHERE mstr_iv30 IS NOT NULL) AS last, ROUND(MIN(mstr_iv30)::numeric, 4) AS min_iv, ROUND(AVG(mstr_iv30)::numeric, 4) AS avg_iv, ROUND(MAX(mstr_iv30)::numeric, 4) AS max_iv FROM indicators_daily;" \
@@ -205,6 +213,7 @@ clean: ## Stop and REMOVE volumes (DESTROYS DATA!)
         backfill-binance-funding backfill-hyperliquid-funding backfill-yieldmax-msty \
         compute-indicators compute-indicators-recent verify-indicators \
         compute-mstr-iv compute-mstr-iv-recent verify-mstr-iv \
+        compute-iv-decomp verify-iv-decomp \
         beat-schedule worker-active telegram-test briefing-preview \
         verify-equities verify-btc-dvol verify-btc-daily verify-mstr-holdings \
         verify-options verify-funding verify-msty-classification verify-runs \

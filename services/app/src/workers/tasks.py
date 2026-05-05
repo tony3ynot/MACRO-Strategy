@@ -119,6 +119,32 @@ def compute_mstr_iv30_daily() -> int:
     return upsert_mstr_iv30(engine, iv30)
 
 
+@celery_app.task(name="workers.tasks.compute_iv_decomposition")
+def compute_iv_decomposition() -> int:
+    """Refit β(t) and EquityPremium(t) from the latest MSTR / BTC IV.
+
+    Cheap (closed-form rolling OLS over <500 rows), so we recompute the
+    full series each tick — there's no incremental gain in scoping it
+    to a lookback window."""
+    from scripts.compute_iv_decomposition import (
+        load_paired_iv,
+        upsert_decomposition,
+    )
+    from quant.indicators.iv_decomposition import (
+        DEFAULT_WINDOW,
+        best_lag,
+        compute_decomposition,
+    )
+    from core.db import make_sync_engine
+
+    engine = make_sync_engine()
+    mstr_iv, btc_iv = load_paired_iv(engine)
+    chosen_lag, _ = best_lag(mstr_iv, btc_iv)
+    decomp = compute_decomposition(mstr_iv, btc_iv, lag=chosen_lag, window=DEFAULT_WINDOW)
+    valid = decomp.dropna(subset=["beta_iv", "equity_premium"], how="all")
+    return upsert_decomposition(engine, valid)
+
+
 # ─── Briefing (Phase 1: stub; Phase 2: indicator-driven) ─────────────────
 
 @celery_app.task(name="workers.tasks.send_daily_briefing")
