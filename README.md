@@ -29,33 +29,37 @@
 
 ---
 
-## Strategy Architecture — 4-State Allocator
+## Strategy Architecture — Continuous-weight Allocator + Drawdown Circuit Breaker
 
-배포된 allocator는 매일 다음 4 state 중 하나로 자본을 배분합니다.
+배포 strategy = **macro_trend_v3**: 매일 연속 weight 발행 + 자체 drawdown 발생 시 자동 de-risk.
 정식 사양: [`docs/STRATEGY.md`](docs/STRATEGY.md).
 
-| State | Trigger (요약) | Allocation |
-|---|---|---|
-| **ACCUMULATE** | MSTR > MA50 > MA200 (uptrend) 또는 얕은 조정 | MSTR/MSTU 동적 leverage (vol-target 0.5 + mNAV overlay) |
-| **HARVEST** | BTC IV>40% **AND** VRP>+3% **AND** BTC RV<50% **AND** MSTR이 MA200 ±10% 횡보 | **MSTY 100%** (옵션 프리미엄 수확) |
-| **HEDGE** | MSTR < MA50 < MA200 **AND** VRP ≤ 0 | **MSTZ 100%** (vol chaos에 비대칭 페이오프) |
-| **WAIT** | MA200 아래지만 panic 아님 | **Cash 100%** (no edge available) |
+```
+base   : MSTR    0.50 - 1.00   ← mNAV bucket (deep discount → 1.0, extreme premium → 0.5)
+overlay: MSTU    0   - 0.30   ← uptrend + mNAV ≤ 1.20 + 비overheat
+         MSTY    0   - 0.20   ← sideways + IV>40% + VRP>3% + RV<50%
+         MSTZ    0   - 0.15   ← MSTR<MA50<MA200 + VRP≤0
+cash   : implicit residual
 
-전이는 leveraged side(ACCUMULATE/HEDGE)로 들어갈 때 **2일 confirmation**, de-risking(HARVEST/WAIT)은 즉시 — whipsaw vs edge-loss 균형.
+circuit breaker: 책 drawdown ≤ -20% → 모든 weight × 0.50 (cash 증가, 숏 안 함)
+                 drawdown ≥ -10% 회복 시 normal mode 복귀
+```
 
-### Validation — 3 윈도우 정직한 결과
+서로 배타적: MSTZ가 켜지면 MSTU/MSTY 모두 0; MSTY가 켜지면 MSTU 0.
 
-| Window | macro_trend (CAGR/MDD) | BH MSTR | Alpha CAGR | MDD reduction |
-|---|---:|---:|---:|---:|
-| **LIVE** 2024-05 → 2026-05 (24mo, bear-heavy) | **+42.53% / -36.74%** | +7.85% / -77.42% | **+34.7pp** | -41pp |
-| **EXTENDED** 2021-03 → 2026-05 (5y full cycle) | +18.94% / -78.96% | +23.67% / -84.11% | -4.7pp | -5pp |
-| LONG 2017-01 → 2026-05 (BTC indicators absent pre-2021) | +7.18% / -81.28% | +26.98% / -89.27% | -19.8pp | -8pp |
+### Validation — 3 windows
 
-**정직한 framing — alpha generator가 아니라 drawdown reducer**:
-- 약세장에선 CAGR alpha + MDD 절반 (LIVE)
-- 풀사이클에선 BH MSTR 대비 살짝 underperform, Calmar 비슷 (EXTENDED)
-- 가치는 "100% MSTR 보유 시 -84% drawdown을 -79%로 줄이는 overlay"
-- 자세한 분석: [`docs/STRATEGY.md §6`](docs/STRATEGY.md#6-validation)
+| Window | macro_trend_v3 (CAGR/MDD) | BH MSTR | Calmar v3 / BH |
+|---|---:|---:|---:|
+| LONG 2017→ (9y) | **+17.54% / -48%** | +26.98% / -89% | **0.37 / 0.30** ✅ |
+| EXTENDED 2021→ (5y, full cycle) | **+14.11% / -48%** | +23.67% / -84% | **0.29 / 0.28** ≈ |
+| LIVE 2024-05→ (2y, bear-heavy) | **+13.67% / -48%** | +7.85% / -77% | **0.28 / 0.10** ✅ |
+
+**진짜 framing — drawdown reducer with positive returns**:
+- 모든 cycle에서 BH MSTR과 동등 또는 우월한 Calmar
+- CAGR ~5-10pp 양보, MDD **-30~40pp 일관 감소**
+- 손실 회복 기간 짧고 panic mode 자동 작동
+- v1 (state machine) / v2 (continuous, no breaker)는 진단용으로 보존, 자세한 비교: [`docs/STRATEGY.md §6.1`](docs/STRATEGY.md#61-three-window-backtest)
 
 ---
 

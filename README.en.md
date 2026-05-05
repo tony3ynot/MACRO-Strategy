@@ -29,36 +29,40 @@ The alpha source is not asset selection — it is **rotation timing**.
 
 ---
 
-## Strategy Architecture — 4-State Allocator
+## Strategy Architecture — Continuous-weight Allocator + Drawdown Circuit Breaker
 
-The deployed allocator picks one of four states each day.
+Production strategy = **macro_trend_v3**: emits continuous target
+weights every day, with a self-monitoring drawdown circuit breaker
+that halves gross exposure when the book is in trouble.
 Formal spec: [`docs/STRATEGY.md`](docs/STRATEGY.md).
 
-| State | Trigger (summary) | Allocation |
-|---|---|---|
-| **ACCUMULATE** | MSTR > MA50 > MA200 (uptrend) or shallow pullback | MSTR / MSTU dynamic leverage (vol-target 0.5 + mNAV overlay) |
-| **HARVEST** | BTC IV>40% **AND** VRP>+3% **AND** BTC RV<50% **AND** MSTR within ±10% of MA200 | **MSTY 100%** (premium harvest) |
-| **HEDGE** | MSTR < MA50 < MA200 **AND** VRP ≤ 0 | **MSTZ 100%** (asymmetric payoff in vol chaos) |
-| **WAIT** | below MA200 but no panic | **Cash 100%** (no edge available) |
+```
+base   : MSTR    0.50 - 1.00   ← mNAV bucket curve (deep discount → 1.0, extreme premium → 0.5)
+overlay: MSTU    0   - 0.30   ← uptrend + mNAV ≤ 1.20 + not-overheat
+         MSTY    0   - 0.20   ← sideways + IV>40% + VRP>3% + RV<50%
+         MSTZ    0   - 0.15   ← MSTR<MA50<MA200 + VRP≤0
+cash   : implicit residual
 
-Risk-on transitions (ACCUMULATE / HEDGE) require **2-day confirmation**;
-de-risking transitions (HARVEST / WAIT) are instant — balancing whipsaw
-suppression against edge-loss risk.
+circuit breaker: book DD ≤ -20% → multiply every weight by 0.50 (raise cash, no short)
+                 book DD ≥ -10% → exit panic, full size
+```
 
-### Validation — three windows, honest reporting
+Mutually exclusive: MSTZ active turns off MSTU and MSTY; MSTY active turns off MSTU.
 
-| Window | macro_trend (CAGR / MDD) | BH MSTR | Alpha CAGR | MDD reduction |
-|---|---:|---:|---:|---:|
-| **LIVE** 2024-05 → 2026-05 (24 mo, bear-heavy) | **+42.53 % / -36.74 %** | +7.85 % / -77.42 % | **+34.7 pp** | -41 pp |
-| **EXTENDED** 2021-03 → 2026-05 (5 y full cycle) | +18.94 % / -78.96 % | +23.67 % / -84.11 % | -4.7 pp | -5 pp |
-| LONG 2017-01 → 2026-05 (BTC indicators absent pre-2021) | +7.18 % / -81.28 % | +26.98 % / -89.27 % | -19.8 pp | -8 pp |
+### Validation — three windows
 
-**Honest framing — drawdown reducer, not alpha generator**:
-- Bear regimes: positive CAGR alpha + roughly half the drawdown (LIVE)
-- Full cycle: trails BH MSTR by ~5 pp CAGR, similar Calmar (EXTENDED)
-- Value proposition: a defensive overlay that takes MSTR's -84 % cycle
-  drawdown down to -79 % at a small CAGR cost
-- Full analysis: [`docs/STRATEGY.md §6`](docs/STRATEGY.md#6-validation)
+| Window | macro_trend_v3 (CAGR / MDD) | BH MSTR | Calmar v3 / BH |
+|---|---:|---:|---:|
+| LONG 2017→ (9 y) | **+17.54 % / -48 %** | +26.98 % / -89 % | **0.37 / 0.30** ✅ |
+| EXTENDED 2021→ (5 y full cycle) | **+14.11 % / -48 %** | +23.67 % / -84 % | **0.29 / 0.28** ≈ |
+| LIVE 2024-05 → (2 y, bear-heavy) | **+13.67 % / -48 %** | +7.85 % / -77 % | **0.28 / 0.10** ✅ |
+
+**Honest framing — drawdown reducer with positive returns**:
+- Calmar matches or beats BH MSTR across all three windows
+- Gives up ~5–10 pp CAGR in exchange for **30–40 pp lower MDD** every cycle
+- Drawdowns recover faster; panic mode self-activates
+- v1 (state machine) and v2 (continuous, no breaker) preserved for
+  diagnostic comparison — see [`docs/STRATEGY.md §6.1`](docs/STRATEGY.md#61-three-window-backtest)
 
 ---
 

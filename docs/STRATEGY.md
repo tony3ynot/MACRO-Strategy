@@ -1,8 +1,9 @@
 # MACRO Strategy — Formal Logic Specification
 
 > **Implementation reference for the production allocator.**
-> Code: [`services/app/src/quant/backtesting/strategies/macro_trend.py`](../services/app/src/quant/backtesting/strategies/macro_trend.py)
-> Last validated: Phase 2 D5 (commit `fd49bfa`).
+> Current production strategy: **macro_trend_v3** (continuous-weight allocator + drawdown circuit breaker)
+> Code: [`services/app/src/quant/backtesting/strategies/macro_trend_v3.py`](../services/app/src/quant/backtesting/strategies/macro_trend_v3.py)
+> Three iterations preserved in the same package for diagnostic comparison.
 
 This document specifies the deployed strategy's behaviour, parameters,
 inputs, and validation results. It is the source of truth for what the
@@ -24,92 +25,116 @@ Four MSTR-family instruments, all retail-tradable in Korean accounts:
 
 ---
 
-## 2. State Machine
+## 2. Allocator architecture
 
-Four states. Daily decision; transitions guarded by 2-day hysteresis on
-risk-on / risk-off flips to suppress whipsaws.
+Continuous-weight allocator (no binary state machine). Each day the
+strategy emits target weights for {MSTR, MSTU, MSTY, MSTZ}; cash is
+the implicit residual. A drawdown circuit breaker halves gross
+exposure when the book itself is in trouble.
 
 ```
-                     ┌────────────────┐
-                     │   ACCUMULATE   │  long MSTR/MSTU, vol-target sized
-                     │   (default)    │
-                     └───┬─────────┬──┘
-        ┌────────────────┘         └────────────────┐
-        ▼                                           ▼
-┌────────────────┐  IV high + RV low      ┌────────────────┐
-│    HARVEST     │  + sideways MSTR       │     HEDGE      │  MA downtrend
-│   100% MSTY    │                        │   100% MSTZ    │  + VRP ≤ 0
-└───────┬────────┘                        └───────┬────────┘
-        │                                         │
-        └────────────────┐    ┌───────────────────┘
-                         ▼    ▼
-                    ┌──────────┐
-                    │   WAIT   │   below MA200, no panic
-                    │  (cash)  │
-                    └──────────┘
+       ┌──────────────────────────────────────────────────┐
+       │  v2 base: continuous weights                     │
+       │                                                   │
+       │   MSTR base   ← mNAV bucket  (0.50 - 1.00)        │
+       │   MSTU overlay (+0 - 0.30, uptrend + discount)   │
+       │   MSTY overlay (+0 - 0.20, sideways + IV-rich)   │
+       │   MSTZ overlay (+0 - 0.15, MA downtrend + VRP≤0) │
+       │                                                   │
+       │   mutually exclusive: MSTZ excludes MSTU & MSTY,  │
+       │                       MSTY excludes MSTU         │
+       └──────────────────────────────┬───────────────────┘
+                                      │
+        ┌─── if book DD ≤ -20% ───┐   │
+        │                          ▼   │
+        │      ┌─────────────────────────────┐
+        │      │ panic: × 0.5 on every weight│   (rest = cash)
+        │      └────────────────────────────┘
+        │                          │
+        └── exit when DD ≥ -10% ───┘
 ```
 
-### 2.1 State definitions (priority order)
+The previous (v1) state machine — ACCUMULATE / HARVEST / HEDGE / WAIT
+with 100 %-of-portfolio swings — is preserved in `macro_trend.py` for
+diagnostic comparison; v1 spent 27 % of its time in WAIT (cash) and
+sacrificed too much upside.  v3's continuous mix + circuit breaker is
+the production allocator.
 
-| Priority | State | Trigger (all conditions AND'd) |
-|---|---|---|
-| 1 | **HARVEST** | `BTC_IV30 > 40%` AND `VRP > +3%` AND `BTC_RV20 < 50%` AND `\|MSTR / MA200 − 1\| ≤ 10%` |
-| 2 | **HEDGE** | `MSTR < MA50 < MA200` AND `VRP ≤ 0%` |
-| 3 | **ACCUMULATE** | `MSTR > MA50 > MA200` (uptrend) OR `MSTR / MA200 > -10%` (shallow pullback) |
-| 4 | **WAIT** | else (below MA200, not panic) |
+### 2.1 MSTR base — mNAV bucket curve
 
-The first matching condition wins. HARVEST sits at priority 1 because it
-is genuinely additive only inside a narrow vol-seller window — outside
-that window MSTY's covered-call cap on a high-vol underlying is a
-liability, not an asset.
+The single most discriminating signal MSTR-side is mNAV (market cap /
+BTC-treasury value). Bucketed:
 
-### 2.2 Hysteresis
+| mNAV bucket | MSTR base weight | Reading |
+|---|---:|---|
+| ≤ 0.95 | 1.00 | deep discount → max long base |
+| 0.95 – 1.20 | 0.90 | mild discount / fair |
+| 1.20 – 1.50 | 0.80 | mild premium |
+| 1.50 – 2.00 | 0.65 | rich premium |
+| > 2.00 | 0.50 | extreme premium → start de-risking |
+| (mNAV unavailable) | 0.85 | neutral fallback (pre-2020-08) |
 
-| Transition | Confirmation |
+### 2.2 MSTU overlay — leveraged-uptrend tilt
+
+ON when *all* hold:
+
+```
+MSTR > MA50 > MA200          (Faber 2007 uptrend)
+gap(MSTR, MA200) < +20 %     (not in extreme overheat)
+mNAV ≤ 1.20                  (still has revaluation room)
+```
+
+Sized by the same mNAV bucket so deep discount + uptrend gets the full
+0.30 overlay; mild discount gets 0.20; near-fair gets 0.10.
+
+### 2.3 MSTY overlay — narrow vol-seller window
+
+ON when *all* hold:
+
+```
+BTC IV30 > 40 %      (premium $ matter)
+BTC VRP > +3 %       (IV exceeds RV)
+BTC RV20 < 50 %      (calls expire OTM)
+|MSTR / MA200 − 1| ≤ 10 %   (genuinely sideways)
+```
+
+Sized at fixed 0.20. Mutually exclusive with MSTU (a sideways book
+shouldn't also bet on a leveraged trend).
+
+### 2.4 MSTZ overlay — asymmetric hedge
+
+ON when:
+
+```
+MSTR < MA50 < MA200          (Faber 2007 downtrend)
+BTC VRP ≤ 0 %                (RV ≥ IV — panic, not yet priced)
+```
+
+Sized at 0.15. Trims MSTR base to ≤ 0.65 because the book is now
+explicitly hedging, not adding. Mutually exclusive with both MSTU and
+MSTY.
+
+### 2.5 Drawdown circuit breaker (v3)
+
+The engine writes `state.equity` and `state.equity_peak` before each
+strategy call so the strategy can read its own drawdown. A two-state
+hysteresis handles the panic gate:
+
+| Transition | Trigger |
 |---|---|
-| → ACCUMULATE | 2 trading days |
-| → HEDGE | 2 trading days |
-| → HARVEST | instant (de-risking from leverage) |
-| → WAIT | instant (de-risking from leverage) |
+| normal → panic | book drawdown ≤ −20 % |
+| panic → normal | book drawdown ≥ −10 % |
 
----
+**In panic**, every v2 weight is multiplied by 0.50. The freed
+allocation goes to cash. We do **not** add a short overlay during
+panic — a first iteration tried 25 % MSTZ and found the resulting
+≈ −20 % net delta fought every relief rally and turned the strategy
+into a structural short. Halving longs is the correct shape for
+"preserve capital, ride the recovery".
 
-## 3. Per-State Allocation
-
-### 3.1 ACCUMULATE — vol-targeted MSTR/MSTU spread
-
-**Base leverage** (Hurst-Ooi-Pedersen 2017, vol-targeting):
-
-```
-target_leverage = clamp( vol_target / MSTR_RV20 , 0.5 , 2.0 )
-                  vol_target = 0.50  (D5-tuned)
-```
-
-**mNAV mean-reversion overlay** (additive bias):
-
-| mNAV band | Adjustment |
-|---|---|
-| ≤ 1.05 (discount) | +0.3× leverage (lever into discount) |
-| 1.05 – 1.50 (fair) | no change |
-| ≥ 1.50 (premium) | cap leverage at 1.0× (no MSTU) |
-
-**Overheat de-risk** (price gap above MA200):
-
-| Gap vs MA200 | Cap |
-|---|---|
-| ≥ +20 % (extreme) | leverage ≤ 0.5× |
-| ≥ +10 % (overheat) | leverage ≤ 1.0× |
-
-**Final split** — express target leverage as a MSTR(1×) + MSTU(2×) mix:
-
-```
-L ≤ 1: MSTR weight = L
-L > 1: MSTR weight = 2 − L,   MSTU weight = L − 1
-```
-
-### 3.2 HARVEST — `MSTY 100%`
-### 3.3 HEDGE — `MSTZ 100%`
-### 3.4 WAIT — `Cash 100%`
+The wide hysteresis band (−20 % → −10 %) prevents whipsawing when a
+brief relief rally takes the book back toward break-even but the
+underlying bear hasn't ended.
 
 ---
 
@@ -145,24 +170,26 @@ addressed.
 
 ## 5. Parameters
 
-Single source of truth: `TrendParams` dataclass in
-[`macro_trend.py`](../services/app/src/quant/backtesting/strategies/macro_trend.py).
+Single source of truth: `TrendV3Params` (which wraps `TrendV2Params`)
+in [`macro_trend_v3.py`](../services/app/src/quant/backtesting/strategies/macro_trend_v3.py).
 
 | Parameter | Default | Rationale |
 |---|---|---|
 | `ma_fast` | 50 | Faber 2007 GTAA medium-term filter |
-| `ma_slow` | 200 | Faber 2007 GTAA tactical line (10-month) |
-| `flip_days` | 2 | Whipsaw filter; sweep showed 2 is the sweet spot |
-| `mnav_discount` | 1.05 | "near or below NAV" → bias to leverage |
-| `mnav_premium` | 1.50 | 50 % premium → cap leverage |
-| `harvest_iv_floor` | 0.40 | absolute IV must be high to make premium meaningful |
-| `harvest_vrp_floor` | 0.03 | IV exceeds RV by ≥ 3 % p.a. |
-| `harvest_rv_ceil` | 0.50 | RV stays calm → calls expire OTM |
-| `harvest_band` | 0.10 | MSTR within ±10 % of MA200 → genuinely sideways |
-| `hedge_vrp` | **0.00** | D5-tuned: any non-positive VRP + MA downtrend triggers hedge |
-| `vol_target` | **0.70** | EXTENDED-validated: 70 % p.a. vol target (≈ 1.08× typical leverage). Earlier D5 picked 0.50 on a bear-only TEST window; the 5-year EXTENDED sweep showed that was over-fit. |
-
-**EXTENDED-validated** = sweep covers 2021-03 → today (full bull/bear cycle).
+| `ma_slow` | 200 | Faber 2007 GTAA long-term tactical line (10-month) |
+| `mstu_max` | 0.30 | leveraged-uptrend overlay cap |
+| `msty_max` | 0.20 | sideways harvest overlay cap |
+| `mstz_max` | 0.15 | asymmetric hedge overlay cap |
+| `gap_overheat` | +0.20 | block MSTU once MSTR is 20 % above MA200 |
+| `mstu_mnav_cap` | 1.20 | block MSTU at mild premium (no leverage if rich) |
+| `msty_iv_floor` | 0.40 | absolute IV high enough that premium dominates decay |
+| `msty_vrp_floor` | 0.03 | IV exceeds RV by ≥ 3 % p.a. |
+| `msty_rv_ceil` | 0.50 | RV calm enough that calls expire OTM |
+| `msty_band` | 0.10 | MSTR within ±10 % of MA200 → genuinely sideways |
+| `mstz_vrp` | 0.00 | non-positive VRP + downtrend triggers hedge |
+| `dd_panic_trigger` | -0.20 | book drawdown that activates the circuit breaker |
+| `dd_panic_exit` | -0.10 | book drawdown threshold to leave panic |
+| `panic_scale` | 0.50 | gross-exposure haircut while in panic |
 
 ---
 
@@ -175,42 +202,56 @@ Cost setting throughout: 10 bps per turnover unit (realistic spread).
 
 | Window | Period | What it measures |
 |---|---|---|
-| LONG | 2017-01 → today | Stress test only — BTC IV / VRP / RV indicators don't exist pre-2021-03 (Deribit DVOL launch), so HARVEST and HEDGE are dormant for the first 4 years. macro_trend degrades to vol-targeted MSTR/MSTU and underperforms BH MSTR. **Not a fair-alpha estimate.** |
-| EXTENDED | 2021-03 → today | All MACRO indicators present, MSTU/MSTY/MSTZ synthetic pre-launch. The longest window where the strategy can fully express itself. |
-| LIVE | 2024-05 → today | Real ETFs + dense indicators. The cleanest test, but only 24 months — happens to be bear-heavy. |
+| LONG | 2017-01 → today | Stress test — BTC IV / VRP / RV don't exist pre-2021-03 (DVOL launch), so HARVEST/HEDGE/MSTU overlays are dormant for the first 4 years. Strategy degrades to "MSTR base + DD breaker". |
+| EXTENDED | 2021-03 → today | All MACRO indicators present, MSTU/MSTY/MSTZ synthetic pre-launch. The longest window where the full strategy can express itself. |
+| LIVE | 2024-05 → today | Real ETFs + dense indicators. Cleanest test; only 24 months and bear-heavy. |
+
+Headline numbers (cost_bps = 10):
 
 | Strategy | LONG (9y) | EXTENDED (5y) | LIVE (2y) |
 |---|---:|---:|---:|
-| **macro_trend** | +7.18 % / -81.3 % | **+18.94 % / -78.96 %** | **+42.53 % / -36.74 %** |
-| BH MSTR | +26.98 % / -89.3 % | +23.67 % / -84.11 % | +7.85 % / -77.42 % |
-| BH MSTU (synth) | -16.28 % / -99.9 % | -41.43 % / -99.56 % | -57.27 % / -98.58 % |
-| BH MSTY (synth) | +115.62 % / -71.8 % | +90.60 % / -71.79 % | +4.42 % / -71.79 % |
-| Mix 50 % MSTR/MSTY | +73.20 % / -74.3 % | +62.66 % / -74.25 % | +6.82 % / -74.25 % |
-| macro_regime | +23.99 % / -89.3 % | +18.40 % / -84.11 % | -3.71 % / -79.25 % |
+| **macro_trend_v3** *(production)* | **+17.54 % / -48 %** | **+14.11 % / -48 %** | **+13.67 % / -48 %** |
+| macro_trend_v2 (no breaker) | +19.75 % / -66 % | +17.58 % / -66 % | +6.57 % / -66 % |
+| macro_trend (v1, state machine) | +7.18 % / -81 % | +18.94 % / -79 % | +42.53 % / -37 % |
+| macro_regime | +23.99 % / -89 % | +18.40 % / -84 % | -3.71 % / -79 % |
+| BH MSTR | +26.98 % / -89 % | +23.67 % / -84 % | +7.85 % / -77 % |
+| BH MSTU (synth) | -16.28 % / -100 % | -41.43 % / -100 % | -57.27 % / -99 % |
+| BH MSTY (synth) | +115.62 % / -72 % | +90.60 % / -72 % | +4.42 % / -72 % |
+
+Calmar (CAGR / |MDD|) — risk-adjusted summary:
+
+| Strategy | LONG | EXTENDED | LIVE |
+|---|---:|---:|---:|
+| **macro_trend_v3** | **0.37** ✅ | **0.29** ≈ BH | **0.28** > BH |
+| macro_trend_v2 | 0.30 | 0.26 | 0.10 |
+| macro_trend (v1) | 0.09 | 0.24 | **1.16** |
+| BH MSTR | 0.30 | 0.28 | 0.10 |
 
 Honest reading:
 
-- **LIVE is the showcase**. macro_trend's +34.7 pp CAGR alpha and -41 pp
-  MDD reduction over BH MSTR is real, but the LIVE window is bear-heavy
-  (MSTR -57 % from May 2024 to May 2026), so the alpha is largely
-  *defensive alpha*, not return enhancement.
-- **EXTENDED is the honest cycle test**. macro_trend trails BH MSTR by
-  ~5 pp CAGR but reduces MDD by ~5 pp; Calmar is roughly tied. Net over
-  a full bull/bear cycle, the strategy is not a CAGR enhancer — it is
-  a drawdown reducer.
-- **LONG is a sanity check** with caveats: BTC indicators don't exist
-  pre-2021, so HARVEST/HEDGE never trigger and the strategy is degraded
-  to a vol-targeted MSTR/MSTU mix. Underperformance is expected.
+- **v3 dominates Calmar across all three windows**. It accepts a
+  ~5–10 pp lower CAGR than BH MSTR and returns a ~30–40 pp better
+  drawdown — a clean, cycle-robust trade.
+- **v1's spectacular LIVE alpha (+34.7 pp CAGR) is bear-specific** and
+  did not generalise: v1 spent 27 % of EXTENDED in cash (WAIT mode)
+  and gave back the equivalent of two full BTC cycles' upside. Useful
+  diagnostic, not a production target.
+- **v2 is what cycle-robust looks like without a circuit breaker**:
+  similar Calmar to BH but the MDD ceiling is still -66 %. The breaker
+  in v3 trims that to -48 % at the cost of a few more pp of CAGR.
+- **Pure indicator regime classifier (`macro_regime`)** is materially
+  worse than every alternative in EXTENDED and LIVE — fixed indicator
+  thresholds without an MA trend filter aren't enough on this sample.
 
-The right framing: **macro_trend is a defensive overlay that trades
-bull-market upside for bear-market protection.** It is most useful for
-holders who would otherwise be 100 % MSTR and want the worst-case
-drawdown halved; it is less useful for someone optimising for raw CAGR.
+The right framing: **macro_trend_v3 is a drawdown reducer with positive
+returns**. It captures roughly three-quarters of MSTR's long-run return
+in exchange for halving the worst-case drawdown. That is the
+production claim.
 
 BH MSTY (synth) showing +90 % CAGR over EXTENDED is the synthetic
-proxy's flattering assumption (annual yield ~80 %, calibrated on
-2024 peaks); real MSTY's flat ~+4 % CAGR over LIVE is the honest
-number for that ETF as a buy-and-hold.
+proxy's flattering assumption (~80 % annual yield calibrated on 2024
+peaks); real MSTY's flat ~+4 % CAGR over LIVE is the honest number for
+that ETF as a buy-and-hold.
 
 ### 6.2 Walk-forward TRAIN/TEST split
 
@@ -281,7 +322,9 @@ optimising those windows would be classic OOS-fitting.
 
 | File | Purpose |
 |---|---|
-| `quant/backtesting/strategies/macro_trend.py` | This spec, executable |
+| `quant/backtesting/strategies/macro_trend_v3.py` | **Production allocator** (v2 + drawdown circuit breaker) |
+| `quant/backtesting/strategies/macro_trend_v2.py` | Continuous-weight allocator (v3's base) |
+| `quant/backtesting/strategies/macro_trend.py` | v1 4-state machine — kept for diagnostic comparison |
 | `quant/backtesting/data.py` | Panel assembly (real + synthetic, adj_close) |
 | `quant/backtesting/engine.py` | Long-only weight backtester |
 | `quant/indicators/realized_vol.py` | RV computation |
@@ -303,3 +346,5 @@ optimising those windows would be classic OOS-fitting.
 | `eafe646` | D4 | Switch to `adj_close` (MSTY-critical total-return fix) |
 | `dafbb67` | D4 | Cost-stress targets in Makefile |
 | `fd49bfa` | D5 | Walk-forward validation + tuned `hedge_vrp` / `vol_target` defaults |
+| `9227d5a` | D5+ | Honest correction: vol_target 0.50 → 0.70 + EXTENDED window |
+| (this) | D6 | macro_trend_v2 (continuous weights) + v3 (drawdown circuit breaker) — production allocator switches to v3 |

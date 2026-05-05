@@ -37,6 +37,8 @@ from quant.backtesting.engine import compare, run_backtest
 from quant.backtesting.strategies.benchmarks import buy_and_hold, fixed_mix
 from quant.backtesting.strategies.macro_regime import make_macro_regime_strategy
 from quant.backtesting.strategies.macro_trend import make_macro_trend
+from quant.backtesting.strategies.macro_trend_v2 import make_macro_trend_v2
+from quant.backtesting.strategies.macro_trend_v3 import make_macro_trend_v3
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,8 @@ def all_strategies():
         ("Mix 50% MSTR / 50% MSTY",       fixed_mix({"MSTR": 0.5, "MSTY": 0.5})),
         ("Mix 70% MSTR / 30% MSTU",       fixed_mix({"MSTR": 0.7, "MSTU": 0.3})),
         ("macro_trend",                   make_macro_trend()),
+        ("macro_trend_v2",                make_macro_trend_v2()),
+        ("macro_trend_v3",                make_macro_trend_v3()),
         ("macro_regime",                  make_macro_regime_strategy()),
     ]
 

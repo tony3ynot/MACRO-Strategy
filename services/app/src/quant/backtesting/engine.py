@@ -52,6 +52,17 @@ class StrategyState:
     indicators: pd.DataFrame         # date-indexed wide DataFrame with all indicator
                                      # columns (mnav, btc_vrp, beta_iv, etc.)
     last_weights: dict[str, float] = field(default_factory=dict)
+    # Equity-history accessors so strategies can branch on their own
+    # drawdown (e.g. circuit breakers).  The engine writes these in
+    # before each call.
+    equity: float = 1.0
+    equity_peak: float = 1.0
+
+    @property
+    def drawdown(self) -> float:
+        if self.equity_peak <= 0:
+            return 0.0
+        return self.equity / self.equity_peak - 1.0
 
     def price(self, ticker: str, idx: int) -> float:
         return float(self.panel[(ticker, "close")].iloc[idx])
@@ -156,6 +167,7 @@ def run_backtest(
     last_weights = {t: 0.0 for t in tickers}
     trade_log: list[tuple] = []
     cost_rate = cost_bps / 1e4
+    equity_peak = seed
 
     for i in range(n_days):
         if i > 0:
@@ -169,6 +181,12 @@ def run_backtest(
                 if p_prev > 0:
                     ret += w * (p_now / p_prev - 1.0)
             equity[i] = equity[i - 1] * (1.0 + ret)
+
+        # Update equity peak / drawdown handles for the strategy
+        if equity[i] > equity_peak:
+            equity_peak = equity[i]
+        state.equity = float(equity[i])
+        state.equity_peak = float(equity_peak)
 
         # Compute target weights for next-bar exposure
         try:
