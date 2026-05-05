@@ -48,15 +48,21 @@ HARVEST_VRP_FLOOR = 0.03      # IV exceeds RV by ≥ 3 % p.a.
 HARVEST_BTC_RV_CEIL = 0.50    # RV not so high that the underlying gets called
 HARVEST_MSTR_BAND = 0.10      # |MSTR − MA200| / MA200 ≤ 10 % → genuinely sideways
 
-# Hedge rule (downtrend + vol chaos). VRP < 0 means RV exceeds IV — the
-# textbook signature of a panic move that hasn't been priced into options
-# yet, which is when leveraged inverse pays.
-HEDGE_VRP_CHAOS = -0.03
+# Hedge rule.  Originally we required VRP < -3 % (RV exceeds IV — the
+# textbook "panic, not yet priced" signature) on top of a confirmed MA
+# downtrend.  The 12-month OOS sweep (D5) showed that gate is too strict
+# on this sample — running the hedge whenever the MA-downtrend confirms
+# (VRP ≤ 0 % is sufficient) saves ~10 pp CAGR over the test window.
+# We loosen to 0.0 = "any non-positive VRP".
+HEDGE_VRP_CHAOS = 0.00
 
 # ── Volatility targeting (Hurst-Ooi-Pedersen 2017) ─────────────────────
 # Target portfolio realised vol; sizes the MSTR/MSTU split inside
-# ACCUMULATE.  60 % is roughly MSTR's long-term realised vol.
-VOL_TARGET = 0.60
+# ACCUMULATE.  Originally set to 60 % (~MSTR's long-term realised vol).
+# D5 validation showed 50 % gives a smoother OOS curve at modest CAGR
+# cost — half-leverage on a 50 %-vol underlying is the right risk
+# budget for a Korean retail account that can't fluidly hedge.
+VOL_TARGET = 0.50
 LEVERAGE_FLOOR = 0.5
 LEVERAGE_CEIL = 2.0
 

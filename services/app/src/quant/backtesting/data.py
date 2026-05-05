@@ -166,19 +166,24 @@ def load_indicators(engine: Engine) -> pd.DataFrame:
     return df.set_index("date")
 
 
-def add_technical_indicators(panel: pd.DataFrame) -> pd.DataFrame:
-    """Compute MAs and a rolling MAX on each ticker's close.
+MA_WINDOWS = (10, 20, 25, 35, 50, 65, 80, 100, 150, 200, 250)
 
-    Returns a MultiIndex-columns DataFrame with columns
-        (ticker, indicator)  where indicator ∈ {close, MA25, MA50, MA200, MAX}.
+
+def add_technical_indicators(panel: pd.DataFrame) -> pd.DataFrame:
+    """Compute moving averages over `MA_WINDOWS` and a rolling MAX
+    on each ticker's close.
+
+    A wider set of MA windows is pre-computed (rather than on-demand)
+    so parameter-sensitivity sweeps don't silently fall through to a
+    missing-indicator fallback.  Returns a MultiIndex-columns
+    DataFrame: (ticker, indicator).
     """
     out = {}
     for t in panel.columns:
         s = panel[t].astype(float)
         out[(t, "close")] = s
-        out[(t, "MA25")] = s.rolling(25, min_periods=1).mean()
-        out[(t, "MA50")] = s.rolling(50, min_periods=1).mean()
-        out[(t, "MA200")] = s.rolling(200, min_periods=1).mean()
+        for w in MA_WINDOWS:
+            out[(t, f"MA{w}")] = s.rolling(w, min_periods=1).mean()
         out[(t, "MAX")] = s.cummax()
     return pd.concat(out, axis=1).sort_index(axis=1)
 

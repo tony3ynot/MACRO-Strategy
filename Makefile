@@ -130,6 +130,9 @@ backtest-stress: ## Stress test backtest under realistic + worst-case spread
 	  docker compose exec -T app python -m scripts.run_backtest --cost-bps $$c 2>&1 | grep -A 11 "LIVE"; \
 	done
 
+walk-forward: ## D5 train/test split + parameter sensitivity sweep
+	docker compose exec -T app python -m scripts.walk_forward_validation
+
 verify-iv-decomp: ## Show β / EquityPremium fit + recent values
 	@docker compose exec -T postgres psql -U $${PG_USER:-macro} -d $${PG_DB:-macro} \
 		-c "SELECT COUNT(beta_iv) AS fit_days, ROUND(MIN(beta_iv)::numeric, 3) AS min_b, ROUND(AVG(beta_iv)::numeric, 3) AS avg_b, ROUND(MAX(beta_iv)::numeric, 3) AS max_b, ROUND(MIN(equity_premium)::numeric, 4) AS min_ep, ROUND(AVG(equity_premium)::numeric, 4) AS avg_ep, ROUND(MAX(equity_premium)::numeric, 4) AS max_ep FROM indicators_daily WHERE beta_iv IS NOT NULL;" \
@@ -223,7 +226,7 @@ clean: ## Stop and REMOVE volumes (DESTROYS DATA!)
         compute-indicators compute-indicators-recent verify-indicators \
         compute-mstr-iv compute-mstr-iv-recent verify-mstr-iv \
         compute-iv-decomp verify-iv-decomp \
-        backtest backtest-stress \
+        backtest backtest-stress walk-forward \
         beat-schedule worker-active telegram-test briefing-preview \
         verify-equities verify-btc-dvol verify-btc-daily verify-mstr-holdings \
         verify-options verify-funding verify-msty-classification verify-runs \
