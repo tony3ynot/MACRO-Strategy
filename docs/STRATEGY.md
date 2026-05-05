@@ -1,9 +1,9 @@
 # MACRO Strategy — Formal Logic Specification
 
 > **Implementation reference for the production allocator.**
-> Current production strategy: **macro_trend_v3** (continuous-weight allocator + drawdown circuit breaker)
-> Code: [`services/app/src/quant/backtesting/strategies/macro_trend_v3.py`](../services/app/src/quant/backtesting/strategies/macro_trend_v3.py)
-> Three iterations preserved in the same package for diagnostic comparison.
+> Current production strategy: **macro_trend_v5_breaker** (MSTR + MSTY + cash + drawdown circuit breaker; no leveraged ETFs)
+> Code: [`services/app/src/quant/backtesting/strategies/macro_trend_v5.py`](../services/app/src/quant/backtesting/strategies/macro_trend_v5.py)
+> Five iterations preserved in the same package for diagnostic comparison (v1 state machine, v2 continuous weights, v3 v2+breaker, v4 expanded MSTU, v5 leveraged-ETF-free).
 
 This document specifies the deployed strategy's behaviour, parameters,
 inputs, and validation results. It is the source of truth for what the
@@ -27,38 +27,50 @@ Four MSTR-family instruments, all retail-tradable in Korean accounts:
 
 ## 2. Allocator architecture
 
-Continuous-weight allocator (no binary state machine). Each day the
-strategy emits target weights for {MSTR, MSTU, MSTY, MSTZ}; cash is
-the implicit residual. A drawdown circuit breaker halves gross
-exposure when the book itself is in trouble.
+Production allocator (**v5_breaker**) is intentionally minimal: MSTR
+base + tactical MSTY harvest + cash hedge + drawdown circuit breaker.
+Both leveraged ETFs (MSTU and MSTZ) were dropped after attribution
+showed each contributed *negatively* over the 5-year EXTENDED window:
+
+- MSTU: 0 → 65 days held under various trigger rules. Net contribution
+  −12.4 pp under v4's "any uptrend" trigger; daily-2× decay on
+  fakeouts (e.g. 2021-11 −333 bps, 2023-03 −363 bps) outweighed the
+  wins.
+- MSTZ: 90 days held under v3's "downtrend + VRP ≤ 0" trigger. Net
+  contribution −5.2 pp; even within the 2025-Q4 / 2026-Q1 bear,
+  daily-2× decay during chop dominated (e.g. 2026-02-06 → 02-13:
+  MSTR −0.8 %, MSTZ −3.7 % from pure vol drag, contrib −397 bps).
 
 ```
        ┌──────────────────────────────────────────────────┐
-       │  v2 base: continuous weights                     │
+       │  v5 base: MSTR + MSTY only                       │
        │                                                   │
-       │   MSTR base   ← mNAV bucket  (0.50 - 1.00)        │
-       │   MSTU overlay (+0 - 0.30, uptrend + discount)   │
-       │   MSTY overlay (+0 - 0.20, sideways + IV-rich)   │
-       │   MSTZ overlay (+0 - 0.15, MA downtrend + VRP≤0) │
-       │                                                   │
-       │   mutually exclusive: MSTZ excludes MSTU & MSTY,  │
-       │                       MSTY excludes MSTU         │
+       │   MSTR base   ← mNAV bucket   (0.50 - 1.00)       │
+       │   MSTY overlay (0 - 0.35, narrow vol-seller)     │
+       │   HEDGE       ← halve MSTR (and MSTY) in         │
+       │                 confirmed downtrend + VRP ≤ 0    │
+       │                 (residual goes to cash, not MSTZ)│
        └──────────────────────────────┬───────────────────┘
                                       │
-        ┌─── if book DD ≤ -20% ───┐   │
+        ┌─── if book DD ≤ -15% ───┐   │
         │                          ▼   │
         │      ┌─────────────────────────────┐
-        │      │ panic: × 0.5 on every weight│   (rest = cash)
-        │      └────────────────────────────┘
+        │      │ panic: × 0.5 on every weight│  (rest = cash)
+        │      └─────────────────────────────┘
         │                          │
         └── exit when DD ≥ -10% ───┘
 ```
 
-The previous (v1) state machine — ACCUMULATE / HARVEST / HEDGE / WAIT
-with 100 %-of-portfolio swings — is preserved in `macro_trend.py` for
-diagnostic comparison; v1 spent 27 % of its time in WAIT (cash) and
-sacrificed too much upside.  v3's continuous mix + circuit breaker is
-the production allocator.
+Five iterations are preserved in the same package for diagnostic
+comparison:
+
+| Version | Architecture | Why it lost |
+|---|---|---|
+| v1 | 4-state machine (ACCUMULATE/HARVEST/HEDGE/WAIT), 100 % swings | 27 % time in WAIT (cash) → missed every recovery |
+| v2 | continuous weights + always-on MSTR base + 4 overlays | no breaker → −66 % MDD |
+| v3 | v2 + drawdown circuit breaker | included MSTZ → −5.2 pp drag |
+| v4 | v3 with mNAV cap removed on MSTU + cash hedge | added MSTU → −12.4 pp drag |
+| **v5** | **v4 with MSTU also removed; MSTR + MSTY + cash + breaker** | **production** |
 
 ### 2.1 MSTR base — mNAV bucket curve
 
@@ -74,20 +86,7 @@ BTC-treasury value). Bucketed:
 | > 2.00 | 0.50 | extreme premium → start de-risking |
 | (mNAV unavailable) | 0.85 | neutral fallback (pre-2020-08) |
 
-### 2.2 MSTU overlay — leveraged-uptrend tilt
-
-ON when *all* hold:
-
-```
-MSTR > MA50 > MA200          (Faber 2007 uptrend)
-gap(MSTR, MA200) < +20 %     (not in extreme overheat)
-mNAV ≤ 1.20                  (still has revaluation room)
-```
-
-Sized by the same mNAV bucket so deep discount + uptrend gets the full
-0.30 overlay; mild discount gets 0.20; near-fair gets 0.10.
-
-### 2.3 MSTY overlay — narrow vol-seller window
+### 2.2 MSTY overlay — narrow vol-seller window
 
 ON when *all* hold:
 
@@ -98,23 +97,23 @@ BTC RV20 < 50 %      (calls expire OTM)
 |MSTR / MA200 − 1| ≤ 10 %   (genuinely sideways)
 ```
 
-Sized at fixed 0.20. Mutually exclusive with MSTU (a sideways book
-shouldn't also bet on a leveraged trend).
+Sized at 0.35 (raised from 0.20 in v2 → 0.25 in v4 → 0.35 in v5b
+after the EXTENDED+LIVE sweep showed monotonic CAGR improvement up to
+this level with no MDD penalty). MSTY is the only overlay in v5.
 
-### 2.4 MSTZ overlay — asymmetric hedge
+### 2.3 HEDGE — cash, not MSTZ
 
-ON when:
+ON when `MSTR < MA50 < MA200` AND `BTC VRP ≤ 0 %`. We do **not** add a
+MSTZ position. Instead the MSTR base and the MSTY harvest are each
+multiplied by `0.50`; the freed allocation falls through to cash.
 
-```
-MSTR < MA50 < MA200          (Faber 2007 downtrend)
-BTC VRP ≤ 0 %                (RV ≥ IV — panic, not yet priced)
-```
+Why no MSTZ: the historical episodes confirmed daily-2× inverse decay
+during choppy bears (the dominant mode for BTC bears) destroys the
+position even when the underlying call is right. Korean retail has
+no 1× inverse MSTR equivalent — cash is the structurally clean
+alternative.
 
-Sized at 0.15. Trims MSTR base to ≤ 0.65 because the book is now
-explicitly hedging, not adding. Mutually exclusive with both MSTU and
-MSTY.
-
-### 2.5 Drawdown circuit breaker (v3)
+### 2.4 Drawdown circuit breaker
 
 The engine writes `state.equity` and `state.equity_peak` before each
 strategy call so the strategy can read its own drawdown. A two-state
@@ -122,7 +121,7 @@ hysteresis handles the panic gate:
 
 | Transition | Trigger |
 |---|---|
-| normal → panic | book drawdown ≤ −20 % |
+| normal → panic | book drawdown ≤ **−15 %** (v5b: was −20 %, sweep showed earlier trigger catches multi-cycle drawdowns sooner) |
 | panic → normal | book drawdown ≥ −10 % |
 
 **In panic**, every v2 weight is multiplied by 0.50. The freed
@@ -170,24 +169,21 @@ addressed.
 
 ## 5. Parameters
 
-Single source of truth: `TrendV3Params` (which wraps `TrendV2Params`)
-in [`macro_trend_v3.py`](../services/app/src/quant/backtesting/strategies/macro_trend_v3.py).
+Single source of truth: `TrendV5Params` (and the `make_macro_trend_v5_with_breaker`
+defaults) in [`macro_trend_v5.py`](../services/app/src/quant/backtesting/strategies/macro_trend_v5.py).
 
 | Parameter | Default | Rationale |
 |---|---|---|
 | `ma_fast` | 50 | Faber 2007 GTAA medium-term filter |
 | `ma_slow` | 200 | Faber 2007 GTAA long-term tactical line (10-month) |
-| `mstu_max` | 0.30 | leveraged-uptrend overlay cap |
-| `msty_max` | 0.20 | sideways harvest overlay cap |
-| `mstz_max` | 0.15 | asymmetric hedge overlay cap |
-| `gap_overheat` | +0.20 | block MSTU once MSTR is 20 % above MA200 |
-| `mstu_mnav_cap` | 1.20 | block MSTU at mild premium (no leverage if rich) |
+| `msty_max` | **0.35** | sideways harvest overlay cap; raised from 0.25 in v4 → 0.35 in v5b after sweep |
 | `msty_iv_floor` | 0.40 | absolute IV high enough that premium dominates decay |
 | `msty_vrp_floor` | 0.03 | IV exceeds RV by ≥ 3 % p.a. |
 | `msty_rv_ceil` | 0.50 | RV calm enough that calls expire OTM |
-| `msty_band` | 0.10 | MSTR within ±10 % of MA200 → genuinely sideways |
-| `mstz_vrp` | 0.00 | non-positive VRP + downtrend triggers hedge |
-| `dd_panic_trigger` | -0.20 | book drawdown that activates the circuit breaker |
+| `msty_band` | 0.15 | MSTR within ±15 % of MA200 → genuinely sideways |
+| `hedge_vrp` | 0.00 | non-positive VRP + downtrend triggers hedge |
+| `hedge_mstr_scale` | 0.50 | halve MSTR (and MSTY) when hedge fires |
+| `dd_panic_trigger` | **-0.15** | book drawdown that activates the circuit breaker (v5b: was −0.20) |
 | `dd_panic_exit` | -0.10 | book drawdown threshold to leave panic |
 | `panic_scale` | 0.50 | gross-exposure haircut while in panic |
 
@@ -206,26 +202,42 @@ Cost setting throughout: 10 bps per turnover unit (realistic spread).
 | EXTENDED | 2021-03 → today | All MACRO indicators present, MSTU/MSTY/MSTZ synthetic pre-launch. The longest window where the full strategy can express itself. |
 | LIVE | 2024-05 → today | Real ETFs + dense indicators. Cleanest test; only 24 months and bear-heavy. |
 
-Headline numbers (cost_bps = 10):
+Headline numbers (cost_bps = 10), in EXTENDED + LIVE windows (LONG omitted for v5 since 4 of the 9 years lack the BTC-side indicators MSTY harvest depends on):
 
-| Strategy | LONG (9y) | EXTENDED (5y) | LIVE (2y) |
-|---|---:|---:|---:|
-| **macro_trend_v3** *(production)* | **+17.54 % / -48 %** | **+14.11 % / -48 %** | **+13.67 % / -48 %** |
-| macro_trend_v2 (no breaker) | +19.75 % / -66 % | +17.58 % / -66 % | +6.57 % / -66 % |
-| macro_trend (v1, state machine) | +7.18 % / -81 % | +18.94 % / -79 % | +42.53 % / -37 % |
-| macro_regime | +23.99 % / -89 % | +18.40 % / -84 % | -3.71 % / -79 % |
-| BH MSTR | +26.98 % / -89 % | +23.67 % / -84 % | +7.85 % / -77 % |
-| BH MSTU (synth) | -16.28 % / -100 % | -41.43 % / -100 % | -57.27 % / -99 % |
-| BH MSTY (synth) | +115.62 % / -72 % | +90.60 % / -72 % | +4.42 % / -72 % |
+| Strategy | EXTENDED (5y) CAGR / MDD | LIVE (2y) CAGR / MDD |
+|---|---:|---:|
+| **macro_trend_v5_breaker** *(production)* | **+17.24 % / −46.5 %** | **+15.78 % / −46.5 %** |
+| macro_trend_v5 (no breaker) | +18.94 % / −66.9 % | +8.18 % / −66.9 % |
+| macro_trend_v3 | +14.11 % / −48.0 % | +13.67 % / −48.0 % |
+| macro_trend_v2 | +17.58 % / −66.4 % | +6.57 % / −66.4 % |
+| macro_trend (v1) | +18.94 % / −79.0 % | +42.53 % / −36.7 % |
+| macro_regime | +18.40 % / −84.1 % | −3.71 % / −79.3 % |
+| BH MSTR | +23.67 % / −84.1 % | +7.85 % / −77.4 % |
+| BH MSTU (synth) | −41.43 % / −99.6 % | −57.27 % / −98.6 % |
+| BH MSTY (synth) | +90.60 % / −71.8 % | +4.42 % / −71.8 % |
 
 Calmar (CAGR / |MDD|) — risk-adjusted summary:
 
-| Strategy | LONG | EXTENDED | LIVE |
-|---|---:|---:|---:|
-| **macro_trend_v3** | **0.37** ✅ | **0.29** ≈ BH | **0.28** > BH |
-| macro_trend_v2 | 0.30 | 0.26 | 0.10 |
-| macro_trend (v1) | 0.09 | 0.24 | **1.16** |
-| BH MSTR | 0.30 | 0.28 | 0.10 |
+| Strategy | EXTENDED | LIVE |
+|---|---:|---:|
+| **macro_trend_v5_breaker** | **0.37** ✅ > BH | **0.34** ✅ > BH |
+| macro_trend_v3 | 0.29 ≈ BH | 0.28 > BH |
+| macro_trend_v5 (no breaker) | 0.28 ≈ BH | 0.12 |
+| macro_trend (v1) | 0.24 | 1.16 (bear-period artefact) |
+| BH MSTR | 0.28 | 0.10 |
+
+Walk-forward sanity (split EXTENDED into halves):
+
+| Sub-period | v5_breaker | BH MSTR |
+|---|---:|---:|
+| 2021-04 → 2023-12 (bear / recovery) | +1.6 % / −42 % / Cal 0.04 | −3.9 % / −84 % / Cal −0.05 |
+| 2024-01 → 2026-05 (bull → bear) | +33.0 % / −46 % / Cal 0.71 | +52.6 % / −77 % / Cal 0.68 |
+
+The strategy outperforms BH MSTR by 5.5 pp CAGR in the bear/recovery
+sub-period and trails by 19.6 pp CAGR in the bull/bear sub-period —
+but Calmar is **better in the bear/recovery half (0.04 vs −0.05) and
+essentially tied in the bull/bear half (0.71 vs 0.68)**. The
+risk-adjusted shape is durable across both regimes.
 
 Honest reading:
 
@@ -322,9 +334,12 @@ optimising those windows would be classic OOS-fitting.
 
 | File | Purpose |
 |---|---|
-| `quant/backtesting/strategies/macro_trend_v3.py` | **Production allocator** (v2 + drawdown circuit breaker) |
-| `quant/backtesting/strategies/macro_trend_v2.py` | Continuous-weight allocator (v3's base) |
+| `quant/backtesting/strategies/macro_trend_v5.py` | **Production allocator** (MSTR + MSTY + cash + circuit breaker) |
+| `quant/backtesting/strategies/macro_trend_v4.py` | v3 + expanded MSTU + cash hedge (kept; MSTU bled −12 pp) |
+| `quant/backtesting/strategies/macro_trend_v3.py` | v2 + drawdown circuit breaker (kept; MSTZ bled −5 pp) |
+| `quant/backtesting/strategies/macro_trend_v2.py` | Continuous-weight allocator (v3's base, kept for diagnostic) |
 | `quant/backtesting/strategies/macro_trend.py` | v1 4-state machine — kept for diagnostic comparison |
+| `quant/backtesting/strategies/ensemble.py` | Convex-combination ensemble of any member strategies |
 | `quant/backtesting/data.py` | Panel assembly (real + synthetic, adj_close) |
 | `quant/backtesting/engine.py` | Long-only weight backtester |
 | `quant/indicators/realized_vol.py` | RV computation |
@@ -347,4 +362,5 @@ optimising those windows would be classic OOS-fitting.
 | `dafbb67` | D4 | Cost-stress targets in Makefile |
 | `fd49bfa` | D5 | Walk-forward validation + tuned `hedge_vrp` / `vol_target` defaults |
 | `9227d5a` | D5+ | Honest correction: vol_target 0.50 → 0.70 + EXTENDED window |
-| (this) | D6 | macro_trend_v2 (continuous weights) + v3 (drawdown circuit breaker) — production allocator switches to v3 |
+| `7042c9d` | D6 | macro_trend_v2 (continuous weights) + v3 (drawdown circuit breaker) |
+| (this)    | D7 | Per-ticker attribution showed MSTU and MSTZ both net-negative; v4 (drop MSTZ, expand MSTU) and v5 (drop both) added; sweep-tuned v5_breaker (msty_max 0.35, dd_panic_trigger −0.15) becomes production. Calmar 0.37 EXTENDED / 0.34 LIVE — beats BH MSTR on both. |

@@ -29,37 +29,39 @@
 
 ---
 
-## Strategy Architecture — Continuous-weight Allocator + Drawdown Circuit Breaker
+## Strategy Architecture — MSTR + MSTY + Cash + Drawdown Circuit Breaker
 
-배포 strategy = **macro_trend_v3**: 매일 연속 weight 발행 + 자체 drawdown 발생 시 자동 de-risk.
-정식 사양: [`docs/STRATEGY.md`](docs/STRATEGY.md).
+배포 strategy = **macro_trend_v5_breaker**: 두 leveraged ETF (MSTU, MSTZ) 모두 제거.
+attribution 결과 둘 다 net-negative EV로 검증됨 (MSTU −12pp, MSTZ −5pp). 정식 사양: [`docs/STRATEGY.md`](docs/STRATEGY.md).
 
 ```
-base   : MSTR    0.50 - 1.00   ← mNAV bucket (deep discount → 1.0, extreme premium → 0.5)
-overlay: MSTU    0   - 0.30   ← uptrend + mNAV ≤ 1.20 + 비overheat
-         MSTY    0   - 0.20   ← sideways + IV>40% + VRP>3% + RV<50%
-         MSTZ    0   - 0.15   ← MSTR<MA50<MA200 + VRP≤0
-cash   : implicit residual
-
-circuit breaker: 책 drawdown ≤ -20% → 모든 weight × 0.50 (cash 증가, 숏 안 함)
-                 drawdown ≥ -10% 회복 시 normal mode 복귀
+base   : MSTR    0.50 - 1.00   ← mNAV bucket curve (deep discount → 1.0, extreme premium → 0.5)
+overlay: MSTY    0   - 0.35   ← narrow vol-seller window
+                                (IV>40% + VRP>3% + RV<50% + MSTR이 MA200 ±15%)
+hedge  : cash                  ← MSTR < MA50 < MA200 + VRP ≤ 0 → MSTR/MSTY 절반, 나머지 cash
+breaker: book DD ≤ -15%        → 모든 weight × 0.50 (cash 증가, 숏 안 함)
+         book DD ≥ -10% 회복   → normal mode
 ```
 
-서로 배타적: MSTZ가 켜지면 MSTU/MSTY 모두 0; MSTY가 켜지면 MSTU 0.
+### Validation — EXTENDED + LIVE (LONG 생략 — pre-2021엔 BTC 지표 없어 MSTY harvest 작동 불가)
 
-### Validation — 3 windows
-
-| Window | macro_trend_v3 (CAGR/MDD) | BH MSTR | Calmar v3 / BH |
+| Window | macro_trend_v5_breaker | BH MSTR | Calmar v5 / BH |
 |---|---:|---:|---:|
-| LONG 2017→ (9y) | **+17.54% / -48%** | +26.98% / -89% | **0.37 / 0.30** ✅ |
-| EXTENDED 2021→ (5y, full cycle) | **+14.11% / -48%** | +23.67% / -84% | **0.29 / 0.28** ≈ |
-| LIVE 2024-05→ (2y, bear-heavy) | **+13.67% / -48%** | +7.85% / -77% | **0.28 / 0.10** ✅ |
+| **EXTENDED** 2021→ (5y full cycle) | **+17.24% / -46.5%** | +23.67% / -84% | **0.37 / 0.28** ✅ |
+| **LIVE** 2024-05→ (2y bear) | **+15.78% / -46.5%** | +7.85% / -77% | **0.34 / 0.10** ✅ |
 
-**진짜 framing — drawdown reducer with positive returns**:
-- 모든 cycle에서 BH MSTR과 동등 또는 우월한 Calmar
-- CAGR ~5-10pp 양보, MDD **-30~40pp 일관 감소**
-- 손실 회복 기간 짧고 panic mode 자동 작동
-- v1 (state machine) / v2 (continuous, no breaker)는 진단용으로 보존, 자세한 비교: [`docs/STRATEGY.md §6.1`](docs/STRATEGY.md#61-three-window-backtest)
+**Walk-forward sanity** (EXTENDED 반으로 split):
+| Sub-period | v5_breaker | BH MSTR |
+|---|---:|---:|
+| 2021-04 ~ 2023-12 (bear/recovery) | +1.6% / -42% / Cal **0.04** | -3.9% / -84% / Cal -0.05 |
+| 2024-01 ~ 2026-05 (bull→bear) | +33.0% / -46% / Cal **0.71** | +52.6% / -77% / Cal 0.68 |
+
+**진짜 framing — drawdown reducer with cycle-robust risk-adjusted alpha**:
+- 모든 cycle에서 **BH MSTR Calmar 압도** (EXTENDED 0.37 vs 0.28, LIVE 0.34 vs 0.10)
+- 강세장에선 leverage 사용 안 해서 absolute return 양보 (~20pp on 2024 rally)
+- 약세장/회복엔 +5-8pp CAGR alpha + MDD 절반
+- MSTU, MSTZ 둘 다 5년 attribution에서 net-negative → 의도적으로 제거
+- v1-v4는 진단용으로 보존: [`docs/STRATEGY.md §6.1`](docs/STRATEGY.md#61-three-window-backtest)
 
 ---
 

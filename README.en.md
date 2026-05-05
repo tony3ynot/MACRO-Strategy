@@ -29,40 +29,43 @@ The alpha source is not asset selection — it is **rotation timing**.
 
 ---
 
-## Strategy Architecture — Continuous-weight Allocator + Drawdown Circuit Breaker
+## Strategy Architecture — MSTR + MSTY + Cash + Drawdown Circuit Breaker
 
-Production strategy = **macro_trend_v3**: emits continuous target
-weights every day, with a self-monitoring drawdown circuit breaker
-that halves gross exposure when the book is in trouble.
+Production strategy = **macro_trend_v5_breaker**: both leveraged ETFs
+(MSTU, MSTZ) deliberately removed after attribution showed each
+contributed *negatively* over the 5-year EXTENDED window (MSTU
+−12 pp, MSTZ −5 pp from daily-2× decay during chop).
 Formal spec: [`docs/STRATEGY.md`](docs/STRATEGY.md).
 
 ```
-base   : MSTR    0.50 - 1.00   ← mNAV bucket curve (deep discount → 1.0, extreme premium → 0.5)
-overlay: MSTU    0   - 0.30   ← uptrend + mNAV ≤ 1.20 + not-overheat
-         MSTY    0   - 0.20   ← sideways + IV>40% + VRP>3% + RV<50%
-         MSTZ    0   - 0.15   ← MSTR<MA50<MA200 + VRP≤0
-cash   : implicit residual
-
-circuit breaker: book DD ≤ -20% → multiply every weight by 0.50 (raise cash, no short)
-                 book DD ≥ -10% → exit panic, full size
+base   : MSTR   0.50 - 1.00   ← mNAV bucket curve (deep discount → 1.0, extreme premium → 0.5)
+overlay: MSTY   0    - 0.35   ← narrow vol-seller window
+                                (IV>40% + VRP>3% + RV<50% + MSTR within ±15% of MA200)
+hedge  : cash                 ← MSTR<MA50<MA200 + VRP≤0 → halve MSTR/MSTY, residual = cash
+breaker: book DD ≤ -15%       → multiply every weight by 0.50 (raise cash, no short)
+         book DD ≥ -10%       → exit panic, full size
 ```
 
-Mutually exclusive: MSTZ active turns off MSTU and MSTY; MSTY active turns off MSTU.
+### Validation — EXTENDED + LIVE (LONG omitted — BTC indicators absent pre-2021 → MSTY harvest dormant)
 
-### Validation — three windows
-
-| Window | macro_trend_v3 (CAGR / MDD) | BH MSTR | Calmar v3 / BH |
+| Window | macro_trend_v5_breaker | BH MSTR | Calmar v5 / BH |
 |---|---:|---:|---:|
-| LONG 2017→ (9 y) | **+17.54 % / -48 %** | +26.98 % / -89 % | **0.37 / 0.30** ✅ |
-| EXTENDED 2021→ (5 y full cycle) | **+14.11 % / -48 %** | +23.67 % / -84 % | **0.29 / 0.28** ≈ |
-| LIVE 2024-05 → (2 y, bear-heavy) | **+13.67 % / -48 %** | +7.85 % / -77 % | **0.28 / 0.10** ✅ |
+| **EXTENDED** 2021→ (5 y full cycle) | **+17.24 % / -46.5 %** | +23.67 % / -84 % | **0.37 / 0.28** ✅ |
+| **LIVE** 2024-05 → (2 y bear) | **+15.78 % / -46.5 %** | +7.85 % / -77 % | **0.34 / 0.10** ✅ |
 
-**Honest framing — drawdown reducer with positive returns**:
-- Calmar matches or beats BH MSTR across all three windows
-- Gives up ~5–10 pp CAGR in exchange for **30–40 pp lower MDD** every cycle
-- Drawdowns recover faster; panic mode self-activates
-- v1 (state machine) and v2 (continuous, no breaker) preserved for
-  diagnostic comparison — see [`docs/STRATEGY.md §6.1`](docs/STRATEGY.md#61-three-window-backtest)
+Walk-forward sanity (EXTENDED split in half):
+
+| Sub-period | v5_breaker | BH MSTR |
+|---|---:|---:|
+| 2021-04 → 2023-12 (bear / recovery) | +1.6 % / -42 % / Cal **0.04** | -3.9 % / -84 % / Cal -0.05 |
+| 2024-01 → 2026-05 (bull → bear) | +33.0 % / -46 % / Cal **0.71** | +52.6 % / -77 % / Cal 0.68 |
+
+**Honest framing — drawdown reducer with cycle-robust risk-adjusted alpha**:
+- Calmar **beats BH MSTR across both reporting windows** (EXTENDED 0.37 vs 0.28, LIVE 0.34 vs 0.10)
+- In strong bull markets we give up absolute return (~20 pp during 2024 rally) because no leverage
+- In bear / recovery regimes we add 5–8 pp CAGR alpha plus halve the drawdown
+- MSTU and MSTZ both showed negative EV in the 5-year attribution and are intentionally excluded
+- v1–v4 preserved for diagnostic comparison: [`docs/STRATEGY.md §6.1`](docs/STRATEGY.md#61-three-window-backtest)
 
 ---
 

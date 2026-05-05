@@ -39,6 +39,15 @@ from quant.backtesting.strategies.macro_regime import make_macro_regime_strategy
 from quant.backtesting.strategies.macro_trend import make_macro_trend
 from quant.backtesting.strategies.macro_trend_v2 import make_macro_trend_v2
 from quant.backtesting.strategies.macro_trend_v3 import make_macro_trend_v3
+from quant.backtesting.strategies.macro_trend_v4 import (
+    make_macro_trend_v4,
+    make_macro_trend_v4_with_breaker,
+)
+from quant.backtesting.strategies.macro_trend_v5 import (
+    make_macro_trend_v5,
+    make_macro_trend_v5_with_breaker,
+)
+from quant.backtesting.strategies.ensemble import make_ensemble
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +62,14 @@ def all_strategies():
         ("macro_trend",                   make_macro_trend()),
         ("macro_trend_v2",                make_macro_trend_v2()),
         ("macro_trend_v3",                make_macro_trend_v3()),
+        ("macro_trend_v4",                make_macro_trend_v4()),
+        ("macro_trend_v4_breaker",        make_macro_trend_v4_with_breaker()),
+        ("macro_trend_v5",                make_macro_trend_v5()),
+        ("macro_trend_v5_breaker",        make_macro_trend_v5_with_breaker()),
+        ("ensemble v3 + v5_breaker",      make_ensemble([
+            (1.0, make_macro_trend_v3()),
+            (1.0, make_macro_trend_v5_with_breaker()),
+        ])),
         ("macro_regime",                  make_macro_regime_strategy()),
     ]
 
