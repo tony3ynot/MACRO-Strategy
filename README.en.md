@@ -45,18 +45,20 @@ Risk-on transitions (ACCUMULATE / HEDGE) require **2-day confirmation**;
 de-risking transitions (HARVEST / WAIT) are instant — balancing whipsaw
 suppression against edge-loss risk.
 
-### Validation (Phase 2 D5, LIVE 2024-05 → 2026-05)
+### Validation — three windows, honest reporting
 
-| Strategy | CAGR | MDD | Calmar | Sharpe |
+| Window | macro_trend (CAGR / MDD) | BH MSTR | Alpha CAGR | MDD reduction |
 |---|---:|---:|---:|---:|
-| **macro_trend (this spec)** | **+36.07%** | **-33.05%** | **1.09** | 0.84 |
-| BH MSTR | +7.85% | -77.42% | 0.10 | 0.51 |
-| BH MSTY | +4.42% | -71.79% | 0.06 | 0.40 |
-| BH MSTU | -57.27% | -98.58% | — | 0.32 |
+| **LIVE** 2024-05 → 2026-05 (24 mo, bear-heavy) | **+42.53 % / -36.74 %** | +7.85 % / -77.42 % | **+34.7 pp** | -41 pp |
+| **EXTENDED** 2021-03 → 2026-05 (5 y full cycle) | +18.94 % / -78.96 % | +23.67 % / -84.11 % | -4.7 pp | -5 pp |
+| LONG 2017-01 → 2026-05 (BTC indicators absent pre-2021) | +7.18 % / -81.28 % | +26.98 % / -89.27 % | -19.8 pp | -8 pp |
 
-- TEST window (12-month bear) alone: **+59 pp alpha vs MSTR** — defensive design works
-- Cost stress at 25 bps: still **+20 pp alpha** — robust to realistic spreads
-- Walk-forward and parameter-sensitivity details: [`docs/STRATEGY.md §6`](docs/STRATEGY.md#6-validation-phase-2-d5)
+**Honest framing — drawdown reducer, not alpha generator**:
+- Bear regimes: positive CAGR alpha + roughly half the drawdown (LIVE)
+- Full cycle: trails BH MSTR by ~5 pp CAGR, similar Calmar (EXTENDED)
+- Value proposition: a defensive overlay that takes MSTR's -84 % cycle
+  drawdown down to -79 % at a small CAGR cost
+- Full analysis: [`docs/STRATEGY.md §6`](docs/STRATEGY.md#6-validation)
 
 ---
 

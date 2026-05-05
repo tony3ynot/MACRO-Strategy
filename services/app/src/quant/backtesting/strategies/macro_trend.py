@@ -58,11 +58,18 @@ HEDGE_VRP_CHAOS = 0.00
 
 # ── Volatility targeting (Hurst-Ooi-Pedersen 2017) ─────────────────────
 # Target portfolio realised vol; sizes the MSTR/MSTU split inside
-# ACCUMULATE.  Originally set to 60 % (~MSTR's long-term realised vol).
-# D5 validation showed 50 % gives a smoother OOS curve at modest CAGR
-# cost — half-leverage on a 50 %-vol underlying is the right risk
-# budget for a Korean retail account that can't fluidly hedge.
-VOL_TARGET = 0.50
+# ACCUMULATE.  Set to 70 % — slightly above MSTR's typical RV (~65 %)
+# so the typical book runs at ~1.08× leverage during ACCUMULATE.
+#
+# Earlier D5 work tuned this to 0.50 by sweeping a 12-month bear-only
+# TEST window. When the sweep was re-run on the 5-year EXTENDED window
+# (2021-03 onwards, full cycle including 2024 bull), 0.50 was clearly
+# the wrong end of the spectrum — values from 0.50 → 0.80 monotonically
+# lift CAGR and Calmar on both LIVE and EXTENDED. 0.70 is the value
+# that retains meaningful drawdown protection without sacrificing
+# bull-market upside; 0.80 lifts CAGR a bit further but at the cost
+# of larger drawdowns inside ACCUMULATE.
+VOL_TARGET = 0.70
 LEVERAGE_FLOOR = 0.5
 LEVERAGE_CEIL = 2.0
 

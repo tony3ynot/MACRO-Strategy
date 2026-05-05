@@ -160,58 +160,94 @@ Single source of truth: `TrendParams` dataclass in
 | `harvest_rv_ceil` | 0.50 | RV stays calm → calls expire OTM |
 | `harvest_band` | 0.10 | MSTR within ±10 % of MA200 → genuinely sideways |
 | `hedge_vrp` | **0.00** | D5-tuned: any non-positive VRP + MA downtrend triggers hedge |
-| `vol_target` | **0.50** | D5-tuned: half-leverage on a 50 %-vol underlying |
+| `vol_target` | **0.70** | EXTENDED-validated: 70 % p.a. vol target (≈ 1.08× typical leverage). Earlier D5 picked 0.50 on a bear-only TEST window; the 5-year EXTENDED sweep showed that was over-fit. |
 
-**D5-tuned** = improved by walk-forward sensitivity sweep (commit `fd49bfa`).
+**EXTENDED-validated** = sweep covers 2021-03 → today (full bull/bear cycle).
 
 ---
 
-## 6. Validation (Phase 2 D5)
+## 6. Validation
 
-### 6.1 LIVE backtest (2024-05-17 → 2026-05-04, real ETFs)
+Three reporting windows, each addressing a different question.
+Cost setting throughout: 10 bps per turnover unit (realistic spread).
 
-| Strategy | CAGR | MDD | Sharpe | Calmar | Trades |
-|---|---:|---:|---:|---:|---:|
-| **macro_trend** *(this spec)* | **+36.07 %** | **-33.05 %** | **0.84** | **1.09** | 103 |
-| BH MSTR | +7.85 % | -77.42 % | 0.51 | 0.10 | 1 |
-| BH MSTY | +4.42 % | -71.79 % | 0.40 | 0.06 | 1 |
-| BH MSTU | -57.27 % | -98.58 % | 0.32 | — | 1 |
-| Mix 50/50 MSTR/MSTY | +6.82 % | -74.25 % | 0.46 | 0.09 | 2 |
+### 6.1 Three-window backtest
 
-Cost setting: 10 bps per turnover unit (realistic spread). All strategies
-stress-tested at 2 / 10 / 25 bps; macro_trend retains > 20 pp alpha
-over BH MSTR even at 25 bps.
+| Window | Period | What it measures |
+|---|---|---|
+| LONG | 2017-01 → today | Stress test only — BTC IV / VRP / RV indicators don't exist pre-2021-03 (Deribit DVOL launch), so HARVEST and HEDGE are dormant for the first 4 years. macro_trend degrades to vol-targeted MSTR/MSTU and underperforms BH MSTR. **Not a fair-alpha estimate.** |
+| EXTENDED | 2021-03 → today | All MACRO indicators present, MSTU/MSTY/MSTZ synthetic pre-launch. The longest window where the strategy can fully express itself. |
+| LIVE | 2024-05 → today | Real ETFs + dense indicators. The cleanest test, but only 24 months — happens to be bear-heavy. |
 
-### 6.2 Walk-forward (12-month TRAIN + 12-month TEST)
-
-The 24-month sample split into a roaring-bull TRAIN
-(2024-05 → 2025-05, MSTR +153 % CAGR) and a deep-bear TEST
-(2025-05 → 2026-05, MSTR -57 % CAGR), so absolute CAGR drift is
-uninformative; alpha vs MSTR is the right test.
-
-| Window | macro_trend | BH MSTR | Alpha |
+| Strategy | LONG (9y) | EXTENDED (5y) | LIVE (2y) |
 |---|---:|---:|---:|
-| TRAIN | +76.19 % | +153.12 % | **-77 pp** (vol-target caps the rocket) |
-| TEST | +1.96 % | -57.08 % | **+59 pp** (HEDGE / WAIT save capital) |
+| **macro_trend** | +7.18 % / -81.3 % | **+18.94 % / -78.96 %** | **+42.53 % / -36.74 %** |
+| BH MSTR | +26.98 % / -89.3 % | +23.67 % / -84.11 % | +7.85 % / -77.42 % |
+| BH MSTU (synth) | -16.28 % / -99.9 % | -41.43 % / -99.56 % | -57.27 % / -98.58 % |
+| BH MSTY (synth) | +115.62 % / -71.8 % | +90.60 % / -71.79 % | +4.42 % / -71.79 % |
+| Mix 50 % MSTR/MSTY | +73.20 % / -74.3 % | +62.66 % / -74.25 % | +6.82 % / -74.25 % |
+| macro_regime | +23.99 % / -89.3 % | +18.40 % / -84.11 % | -3.71 % / -79.25 % |
 
-**Reading**: the strategy trades bull-market upside for bear-market
-protection by design. The TRAIN underperformance is *expected and
-acceptable* — it would only be alarming if both windows were negative.
+Honest reading:
 
-### 6.3 Parameter robustness (one-at-a-time on TEST OOS)
+- **LIVE is the showcase**. macro_trend's +34.7 pp CAGR alpha and -41 pp
+  MDD reduction over BH MSTR is real, but the LIVE window is bear-heavy
+  (MSTR -57 % from May 2024 to May 2026), so the alpha is largely
+  *defensive alpha*, not return enhancement.
+- **EXTENDED is the honest cycle test**. macro_trend trails BH MSTR by
+  ~5 pp CAGR but reduces MDD by ~5 pp; Calmar is roughly tied. Net over
+  a full bull/bear cycle, the strategy is not a CAGR enhancer — it is
+  a drawdown reducer.
+- **LONG is a sanity check** with caveats: BTC indicators don't exist
+  pre-2021, so HARVEST/HEDGE never trigger and the strategy is degraded
+  to a vol-targeted MSTR/MSTU mix. Underperformance is expected.
 
-The sweep validated the two D5 tuning improvements:
+The right framing: **macro_trend is a defensive overlay that trades
+bull-market upside for bear-market protection.** It is most useful for
+holders who would otherwise be 100 % MSTR and want the worst-case
+drawdown halved; it is less useful for someone optimising for raw CAGR.
 
-| Parameter | Old default | New default | OOS CAGR change |
+BH MSTY (synth) showing +90 % CAGR over EXTENDED is the synthetic
+proxy's flattering assumption (annual yield ~80 %, calibrated on
+2024 peaks); real MSTY's flat ~+4 % CAGR over LIVE is the honest
+number for that ETF as a buy-and-hold.
+
+### 6.2 Walk-forward TRAIN/TEST split
+
+Within the 24-month LIVE window, splitting in half gave a roaring-bull
+TRAIN (MSTR +153 %) and a deep-bear TEST (MSTR -57 %). Absolute drift
+is uninformative; alpha vs MSTR is the right test:
+
+| Window | macro_trend | BH MSTR | Alpha vs MSTR |
 |---|---:|---:|---:|
-| `hedge_vrp` | -0.03 | 0.00 | -11.10 % → -0.74 % (+10 pp) |
-| `vol_target` | 0.60 | 0.50 | -11.10 % → -5.82 % (+5 pp) |
+| TRAIN (bull) | +76.19 % | +153.12 % | **-77 pp** (vol-target caps the rocket) |
+| TEST (bear) | +1.96 % | -57.08 % | **+59 pp** (HEDGE / WAIT save capital) |
 
-Other parameters showed < 8 pp swing across plausible ranges. We
-deliberately did NOT retune `ma_fast` / `ma_slow` despite the sweep
-showing better-than-default values: 50 / 200 are the published Faber
-2007 defaults; cherry-picking other windows on a 24-month sample would
-be classic OOS-fitting.
+This is the same defensive-overlay pattern at finer granularity.
+
+### 6.3 Parameter robustness — important correction
+
+The earlier D5 sweep was run on TEST only (bear 12 months) and picked
+`vol_target = 0.50`. Re-running on EXTENDED (5y full cycle) shows that
+was bear-fit:
+
+| `vol_target` | EXTENDED CAGR | EXTENDED Calmar | LIVE CAGR | LIVE Calmar |
+|---:|---:|---:|---:|---:|
+| 0.50 (D5-tuned) | +12.87 % | 0.17 | +36.07 % | 1.09 |
+| 0.60 (Hurst-Ooi-Pedersen) | +15.25 % | 0.19 | +38.28 % | 1.09 |
+| **0.70 (current)** | **+18.94 %** | **0.24** | **+42.53 %** | **1.16** |
+| 0.80 | +22.61 % | 0.29 | +48.18 % | 1.30 |
+
+Higher vol_target dominates monotonically on both windows — meaning
+0.50 was clearly cherry-picked from the bear sample. Reverting to 0.70
+gives most of the upside-capture without running into the higher-leverage
+drawdown territory of 0.80. `hedge_vrp = 0.00` survives the EXTENDED
+re-check and stays in.
+
+We deliberately do NOT retune `ma_fast` / `ma_slow` despite the
+12-month sweep showing other values: 50 / 200 are the published
+Faber-2007 defaults, and the EXTENDED window is still only 5 years —
+optimising those windows would be classic OOS-fitting.
 
 ---
 

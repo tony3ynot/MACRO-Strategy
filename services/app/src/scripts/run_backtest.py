@@ -1,8 +1,15 @@
 """Run the multi-tier MACRO Strategy backtest comparison.
 
-Two reporting windows:
-  Long  : MSTR's full available history (synthetic MSTU/MSTY/MSTZ pre-2024)
-  Live  : 2024-05-17 → today (real MSTU/MSTY/MSTZ + dense MACRO indicators)
+Three reporting windows:
+  Long      : 2017-01-03 → today.  Synthetic MSTU/MSTY/MSTZ pre-2024 + no
+              BTC IV / VRP / RV pre-2021-03 (Deribit DVOL launch). HARVEST
+              and HEDGE states are dormant throughout the BTC-IV gap, so
+              the strategy degrades to vol-targeted MSTR/MSTU.  Useful as
+              a stress test, NOT as a fair-alpha estimate.
+  Extended  : 2021-03-25 → today.  All MACRO indicators present; MSTU/
+              MSTY/MSTZ still synthetic pre-launch.  This is the longest
+              window where the strategy can fully express itself.
+  Live      : 2024-05-17 → today.  Real ETFs + dense MACRO indicators.
 
 Strategies compared:
   - Buy-and-hold MSTR / MSTU / MSTY
@@ -76,6 +83,10 @@ def main() -> int:
                         help="Per-trade cost in bps of turnover (default 2)")
     parser.add_argument("--long-start", type=date.fromisoformat,
                         default=date(2017, 1, 3))
+    parser.add_argument("--extended-start", type=date.fromisoformat,
+                        default=date(2021, 3, 25),
+                        help="Earliest date with all MACRO indicators "
+                             "available (Deribit DVOL launch).")
     parser.add_argument("--live-start", type=date.fromisoformat,
                         default=date(2024, 5, 17))
     parser.add_argument("--end", type=date.fromisoformat, default=None)
@@ -99,13 +110,18 @@ def main() -> int:
     )
 
     long_table = run_window(panel, indicators, args.long_start, end,
-                            "LONG (synthetic+real)", args.cost_bps)
+                            "LONG (synthetic+real, pre-2021 indicators absent)",
+                            args.cost_bps)
+    extended_table = run_window(panel, indicators, args.extended_start, end,
+                                "EXTENDED (all MACRO indicators present, synth ETFs pre-2024)",
+                                args.cost_bps)
     live_table = run_window(panel, indicators, args.live_start, end,
                             "LIVE (real ETFs + dense indicators)", args.cost_bps)
 
     long_table["window"] = "long"
+    extended_table["window"] = "extended"
     live_table["window"] = "live"
-    out = pd.concat([long_table, live_table])
+    out = pd.concat([long_table, extended_table, live_table])
     out.to_csv(args.out)
     print(f"\n  saved → {args.out}")
     return 0

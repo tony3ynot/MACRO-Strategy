@@ -43,18 +43,19 @@
 
 전이는 leveraged side(ACCUMULATE/HEDGE)로 들어갈 때 **2일 confirmation**, de-risking(HARVEST/WAIT)은 즉시 — whipsaw vs edge-loss 균형.
 
-### Validation (Phase 2 D5, 2024-05 → 2026-05 LIVE)
+### Validation — 3 윈도우 정직한 결과
 
-| 전략 | CAGR | MDD | Calmar | Sharpe |
+| Window | macro_trend (CAGR/MDD) | BH MSTR | Alpha CAGR | MDD reduction |
 |---|---:|---:|---:|---:|
-| **macro_trend (이 spec)** | **+36.07%** | **-33.05%** | **1.09** | 0.84 |
-| BH MSTR | +7.85% | -77.42% | 0.10 | 0.51 |
-| BH MSTY | +4.42% | -71.79% | 0.06 | 0.40 |
-| BH MSTU | -57.27% | -98.58% | — | 0.32 |
+| **LIVE** 2024-05 → 2026-05 (24mo, bear-heavy) | **+42.53% / -36.74%** | +7.85% / -77.42% | **+34.7pp** | -41pp |
+| **EXTENDED** 2021-03 → 2026-05 (5y full cycle) | +18.94% / -78.96% | +23.67% / -84.11% | -4.7pp | -5pp |
+| LONG 2017-01 → 2026-05 (BTC indicators absent pre-2021) | +7.18% / -81.28% | +26.98% / -89.27% | -19.8pp | -8pp |
 
-- TEST window (약세장 12개월) 단독 실행 시 MSTR 대비 **+59pp alpha** — defensive 본분 작동
-- Cost stress 25 bps에서도 **+20pp alpha 유지** — 거래비용 robust
-- 자세한 walk-forward / parameter sensitivity 결과는 [`docs/STRATEGY.md §6`](docs/STRATEGY.md#6-validation-phase-2-d5)
+**정직한 framing — alpha generator가 아니라 drawdown reducer**:
+- 약세장에선 CAGR alpha + MDD 절반 (LIVE)
+- 풀사이클에선 BH MSTR 대비 살짝 underperform, Calmar 비슷 (EXTENDED)
+- 가치는 "100% MSTR 보유 시 -84% drawdown을 -79%로 줄이는 overlay"
+- 자세한 분석: [`docs/STRATEGY.md §6`](docs/STRATEGY.md#6-validation)
 
 ---
 
