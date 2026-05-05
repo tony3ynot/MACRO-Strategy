@@ -170,11 +170,85 @@ def send_daily_briefing() -> str:
 
 
 def _build_briefing_body() -> str:
-    """STUB. Real content TBD with user. Keep this function easy to swap."""
-    return (
-        "MACRO Strategy — Daily Briefing\n"
-        f"({date.today().isoformat()})\n"
-        "\n"
-        "Phase 1 infrastructure online. Regime indicators arrive in Phase 2.\n"
-        "(briefing template under review — content will be replaced)"
+    """Build the daily briefing from the production allocator (v5_breaker).
+
+    Runs the full backtest end-to-end so the panic-mode flag and book
+    drawdown are computed from the same equity curve a live user would
+    have experienced. Reads today's recommended weights, deltas vs
+    yesterday, latest indicators, and the strategy's own drawdown.
+    """
+    import pandas as pd
+
+    from core.db import make_sync_engine
+    from quant.backtesting.data import assemble_full_panel
+    from quant.backtesting.engine import run_backtest
+    from quant.backtesting.strategies.macro_trend_v5 import (
+        make_macro_trend_v5_with_breaker,
     )
+
+    engine = make_sync_engine()
+    try:
+        panel, indicators = assemble_full_panel(engine)
+    except Exception as exc:
+        logger.exception("briefing: panel assembly failed")
+        return f"MACRO Strategy briefing failed: {exc}"
+
+    res = run_backtest(
+        name="briefing",
+        panel=panel,
+        indicators=indicators,
+        strategy=make_macro_trend_v5_with_breaker(),
+        cost_bps=10.0,
+    )
+
+    today_w = res.weights.iloc[-1]
+    prev_w = res.weights.iloc[-2] if len(res.weights) > 1 else today_w
+    cash_today = max(0.0, 1.0 - today_w.sum())
+    cash_prev = max(0.0, 1.0 - prev_w.sum())
+
+    today_idx = indicators.index[-1]
+    today_ind = indicators.loc[today_idx]
+
+    final_eq = float(res.equity.iloc[-1])
+    peak_eq = float(res.equity.cummax().iloc[-1])
+    book_dd = (final_eq / peak_eq - 1.0) if peak_eq > 0 else 0.0
+    in_panic = book_dd <= -0.10  # within hysteresis band → panic still active
+
+    def _fmt_w(name: str, w: float, prev: float) -> str:
+        diff = w - prev
+        marker = "↑" if diff > 0.005 else "↓" if diff < -0.005 else "·"
+        return f"  {name:<5} {w*100:5.1f}%  {marker}"
+
+    lines: list[str] = [
+        f"📊 MACRO Strategy — {today_idx.date().isoformat()}",
+        "",
+        "Recommended allocation:",
+    ]
+    for ticker in ("MSTR", "MSTU", "MSTY", "MSTZ"):
+        w = float(today_w.get(ticker, 0.0))
+        if w > 0.005:
+            lines.append(_fmt_w(ticker, w, float(prev_w.get(ticker, 0.0))))
+    if cash_today > 0.005:
+        lines.append(_fmt_w("Cash", cash_today, cash_prev))
+    if in_panic:
+        lines.append("  ⚠ panic mode active (book DD ≤ -10%)")
+
+    def _ind(label: str, value, fmt: str = "{:.4f}", scale: float = 1.0) -> str:
+        if pd.isna(value):
+            return f"  {label:<10} —"
+        return f"  {label:<10} {fmt.format(float(value) * scale)}"
+
+    lines += [
+        "",
+        "Indicators:",
+        _ind("MSTR",     today_ind.get("mstr_close"), "${:.2f}"),
+        _ind("BTC",      today_ind.get("btc_close"),  "${:,.0f}"),
+        _ind("mNAV",     today_ind.get("mnav"),       "{:.3f}"),
+        _ind("MSTR RV20", today_ind.get("mstr_rv20"), "{:.1f}%", 100),
+        _ind("BTC IV30", today_ind.get("btc_iv30"),   "{:.1f}%", 100),
+        _ind("BTC VRP",  today_ind.get("btc_vrp"),    "{:+.2f}%", 100),
+        "",
+        f"Strategy book DD: {book_dd*100:+.1f}% from peak",
+        f"Trades / yr (5y): {res.metrics['trades'] / 5.1:.0f}",
+    ]
+    return "\n".join(lines)
