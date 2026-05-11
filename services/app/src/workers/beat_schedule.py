@@ -62,4 +62,24 @@ beat_schedule = {
         "task": "workers.tasks.send_daily_briefing",
         "schedule": crontab(hour=0, minute=0),  # 00:00 UTC = 09:00 KST
     },
+
+    # ── Telegram interactive: drain button-taps / slash commands ──────
+    # Non-blocking; we just acknowledge whatever's queued at Telegram.
+    "poll-telegram-updates": {
+        "task": "workers.tasks.poll_telegram_updates",
+        "schedule": 15.0,  # every 15s
+    },
+
+    # ── Intraday data (Phase 2a) ─────────────────────────────────────
+    # BTC 24/7, equities filtered to US market hours inside the task.
+    "ingest-intraday-prices": {
+        "task": "workers.tasks.ingest_intraday_prices",
+        "schedule": 120.0,  # every 2 min
+    },
+
+    # ── Intraday alerts (Phase 2b) — only fires during US hours ─────
+    "check-intraday-alerts": {
+        "task": "workers.tasks.check_intraday_alerts",
+        "schedule": 180.0,  # every 3 min during US session
+    },
 }

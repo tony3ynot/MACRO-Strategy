@@ -145,115 +145,100 @@ def compute_iv_decomposition() -> int:
     return upsert_decomposition(engine, valid)
 
 
-# ─── Briefing (Phase 1: stub; Phase 2: indicator-driven) ─────────────────
+# ─── Briefing & Telegram poller ─────────────────────────────────────────
+
 
 @celery_app.task(name="workers.tasks.send_daily_briefing")
-def send_daily_briefing() -> str:
-    """Build and send the 09:00 KST briefing.
+def send_daily_briefing() -> dict[str, int]:
+    """Change-triggered broadcast at 09:00 KST.
 
-    Phase 1: minimal stub that proves the pipeline (ingestors → DB → bot).
-    Phase 2: replaces `_build_briefing_body` with indicator-driven output
-    (regime, VRP, mNAV, EquityPremium, allocation diff vs current).
+    Replaces the old "always-fire daily briefing".  Now silent on days
+    when the target weights don't change.  Users who want an explicit
+    daily status can run /today on demand.
 
-    The briefing FORMAT is intentionally not fixed yet — we'll refine
-    template + content with the user before locking in.
+    Returns broadcast stats (users seen / fired / skipped) for logging.
     """
-    from core.notifications.telegram import TelegramClient
+    from workers.telegram_handlers import broadcast_change_alert
 
-    body = _build_briefing_body()
-    client = TelegramClient()
-    if not client.is_configured:
-        logger.info("Telegram not configured — briefing built but not sent:\n%s", body)
-        return body
-    client.send_plain(body)
-    return body
+    try:
+        return broadcast_change_alert()
+    except Exception:
+        logger.exception("send_daily_briefing: broadcast crashed")
+        return {"error": 1}
 
 
-def _build_briefing_body() -> str:
-    """Build the daily briefing from the production allocator (v5_breaker).
+@celery_app.task(name="workers.tasks.poll_telegram_updates")
+def poll_telegram_updates() -> int:
+    """Drain pending Telegram updates (button taps + slash commands).
 
-    Runs the full backtest end-to-end so the panic-mode flag and book
-    drawdown are computed from the same equity curve a live user would
-    have experienced. Reads today's recommended weights, deltas vs
-    yesterday, latest indicators, and the strategy's own drawdown.
+    Runs frequently (~15s) via celery beat.  Each call is short — it
+    calls getUpdates with timeout=0 (non-blocking) and only processes
+    what's already queued at Telegram's side.
     """
-    import pandas as pd
+    from workers.telegram_handlers import process_pending_updates
 
-    from core.db import make_sync_engine
-    from quant.backtesting.data import assemble_full_panel
-    from quant.backtesting.engine import run_backtest
-    from quant.backtesting.strategies.macro_trend_v5 import (
-        make_macro_trend_v5_with_breaker,
+    try:
+        return process_pending_updates()
+    except Exception:
+        logger.exception("poll_telegram_updates: top-level crash")
+        return 0
+
+
+# ─── Intraday (Phase 2a/2b) ────────────────────────────────────────────
+
+
+def _us_market_open_now() -> bool:
+    """Cheap heuristic: weekday + within 13:30-20:00 UTC window.
+
+    13:30 UTC = 09:30 EDT (= 08:30 EST during winter — we accept the
+    +1h drift since the alert engine is dedup'd per day).
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    if now.weekday() >= 5:
+        return False
+    return 13 <= now.hour < 21
+
+
+@celery_app.task(name="workers.tasks.ingest_intraday_prices")
+def ingest_intraday_prices() -> dict[str, int]:
+    """Pull latest tick for MSTR family (yfinance) + BTC (Coinbase).
+
+    BTC always runs (24/7).  Equities only during US market hours so
+    we don't burn requests on stale data.
+    """
+    from connectors.intraday_prices import (
+        BTCIntradayIngestor,
+        EquityIntradayIngestor,
     )
+    from core.db import make_sync_engine
 
     engine = make_sync_engine()
+    out: dict[str, int] = {}
     try:
-        panel, indicators = assemble_full_panel(engine)
-    except Exception as exc:
-        logger.exception("briefing: panel assembly failed")
-        return f"MACRO Strategy briefing failed: {exc}"
+        out["BTC"] = BTCIntradayIngestor(engine).run()
+    except Exception:
+        logger.exception("BTC intraday fetch failed")
+        out["BTC"] = 0
 
-    res = run_backtest(
-        name="briefing",
-        panel=panel,
-        indicators=indicators,
-        strategy=make_macro_trend_v5_with_breaker(),
-        cost_bps=10.0,
-    )
+    if _us_market_open_now():
+        try:
+            eq_out = EquityIntradayIngestor(engine).run()
+            out.update(eq_out)
+        except Exception:
+            logger.exception("equity intraday fetch failed")
 
-    today_w = res.weights.iloc[-1]
-    prev_w = res.weights.iloc[-2] if len(res.weights) > 1 else today_w
-    cash_today = max(0.0, 1.0 - today_w.sum())
-    cash_prev = max(0.0, 1.0 - prev_w.sum())
+    return out
 
-    today_idx = indicators.index[-1]
-    today_ind = indicators.loc[today_idx]
 
-    final_eq = float(res.equity.iloc[-1])
-    peak_eq = float(res.equity.cummax().iloc[-1])
-    book_dd = (final_eq / peak_eq - 1.0) if peak_eq > 0 else 0.0
-
-    # Compare today's weights to a 5-day moving average — large drops signal
-    # the breaker / hedge has fired regardless of which gate triggered.
-    recent_total = res.weights.tail(5).sum(axis=1).mean()
-    today_total = float(today_w.sum())
-    de_risked = today_total < recent_total - 0.10  # ≥10pp gross-exposure drop
-
-    def _fmt_w(name: str, w: float, prev: float) -> str:
-        diff = w - prev
-        marker = "↑" if diff > 0.005 else "↓" if diff < -0.005 else "·"
-        return f"  {name:<5} {w*100:5.1f}%  {marker}"
-
-    lines: list[str] = [
-        f"📊 MACRO Strategy — {today_idx.date().isoformat()}",
-        "",
-        "Recommended allocation:",
-    ]
-    for ticker in ("MSTR", "MSTU", "MSTY", "MSTZ"):
-        w = float(today_w.get(ticker, 0.0))
-        if w > 0.005:
-            lines.append(_fmt_w(ticker, w, float(prev_w.get(ticker, 0.0))))
-    if cash_today > 0.005:
-        lines.append(_fmt_w("Cash", cash_today, cash_prev))
-    if de_risked:
-        lines.append("  ⚠ de-risked (gross exposure dropped from recent avg)")
-
-    def _ind(label: str, value, fmt: str = "{:.4f}", scale: float = 1.0) -> str:
-        if pd.isna(value):
-            return f"  {label:<10} —"
-        return f"  {label:<10} {fmt.format(float(value) * scale)}"
-
-    lines += [
-        "",
-        "Indicators:",
-        _ind("MSTR",     today_ind.get("mstr_close"), "${:.2f}"),
-        _ind("BTC",      today_ind.get("btc_close"),  "${:,.0f}"),
-        _ind("mNAV",     today_ind.get("mnav"),       "{:.3f}"),
-        _ind("MSTR RV20", today_ind.get("mstr_rv20"), "{:.1f}%", 100),
-        _ind("BTC IV30", today_ind.get("btc_iv30"),   "{:.1f}%", 100),
-        _ind("BTC VRP",  today_ind.get("btc_vrp"),    "{:+.2f}%", 100),
-        "",
-        f"Strategy book DD: {book_dd*100:+.1f}% from peak",
-        f"Trades / yr (5y): {res.metrics['trades'] / 5.1:.0f}",
-    ]
-    return "\n".join(lines)
+@celery_app.task(name="workers.tasks.check_intraday_alerts")
+def check_intraday_alerts() -> dict[str, int]:
+    """Run alert checks and broadcast to all configured users."""
+    if not _us_market_open_now():
+        return {"alerts": 0, "skipped": 1}
+    from workers.intraday_alerts import fire_alerts
+    try:
+        return fire_alerts()
+    except Exception:
+        logger.exception("check_intraday_alerts: top-level crash")
+        return {"error": 1}
