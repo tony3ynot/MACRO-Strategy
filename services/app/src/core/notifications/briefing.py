@@ -184,14 +184,22 @@ def build_change_alert(
     balance: float | None = None,
     mstr_price: float | None = None,
     btc_price: float | None = None,
+    live_panic: bool = False,
 ) -> str:
+    header = "🚨🚨 LIVE PANIC — 즉시 매매 신호" if live_panic else "🚨 매매 신호"
     lines: list[str] = [
-        f"🚨 매매 신호 — {_date_header(alert_date, signal_date)}",
+        f"{header} — {_date_header(alert_date, signal_date)}",
         "",
     ]
+    if live_panic:
+        lines += [
+            "장중 책 DD가 -15% 임계를 지속 → 보호장치가 일봉 종가 전에 발동했습니다.",
+            "내일 아침 일봉이 확인하면 유지, 반대면 자동 복귀 신호가 옵니다.",
+            "",
+        ]
     lines += _render_action_block(today_w, prev_w, balance=balance, mstr_price=mstr_price)
     lines.append("")
-    if de_risked:
+    if de_risked and not live_panic:
         lines.append("⚠️  위험 회피 모드 진입 (전략 보호장치 작동)")
         lines.append("")
     lines += _render_target_block(today_w, balance=balance, mstr_price=mstr_price)
@@ -222,11 +230,19 @@ def build_status_message(
     balance: float | None = None,
     mstr_price: float | None = None,
     btc_price: float | None = None,
+    live_panic: bool = False,
 ) -> str:
+    header = "🚨 LIVE PANIC 활성" if live_panic else "📈 MACRO 전략"
     lines: list[str] = [
-        f"📈 MACRO 전략 — {_date_header(alert_date, signal_date)}",
+        f"{header} — {_date_header(alert_date, signal_date)}",
         "",
     ]
+    if live_panic:
+        lines += [
+            "장중 보호장치 작동 중 — 아래는 panic-scale 적용된 비중입니다.",
+            "내일 일봉 종가가 확인하면 유지, 반대면 자동 복귀 신호가 갑니다.",
+            "",
+        ]
     lines += _render_target_block(today_w, balance=balance, mstr_price=mstr_price)
     lines.append("")
     if last_signal_at is not None:
@@ -306,19 +322,36 @@ def build_detail_message(
     today_w: dict[str, float],
     book_dd: float,
     trades_per_year: float,
+    live_mnav: float | None = None,
+    live_panic: bool = False,
 ) -> str:
     def _ind(label: str, value: Any, fmt: str = "{:.4f}", scale: float = 1.0) -> str:
         if value is None or pd.isna(value):
             return f"  {label:<10} —"
         return f"  {label:<10} {fmt.format(float(value) * scale)}"
 
+    mnav_daily = today_ind.get("mnav")
+    if live_mnav is not None and mnav_daily is not None and not pd.isna(mnav_daily):
+        mnav_line = (
+            f"  {'mNAV':<10} {float(mnav_daily):.3f}  "
+            f"→ 장중 {live_mnav:.3f}"
+        )
+    elif mnav_daily is not None and not pd.isna(mnav_daily):
+        mnav_line = f"  {'mNAV':<10} {float(mnav_daily):.3f}"
+    else:
+        mnav_line = "  mNAV       —"
+
     lines: list[str] = [
         f"📊 상세 지표 — {_ko_date(signal_date)} 종가 기준",
+    ]
+    if live_panic:
+        lines.append("🚨 LIVE PANIC 활성 (장중 보호장치 작동 중)")
+    lines += [
         "",
         "📍 가격 / 펀더멘털",
         _ind("MSTR",     today_ind.get("mstr_close"), "${:.2f}"),
         _ind("BTC",      today_ind.get("btc_close"),  "${:,.0f}"),
-        _ind("mNAV",     today_ind.get("mnav"),       "{:.3f}"),
+        mnav_line,
         "",
         "🔥 변동성 / VRP",
         _ind("MSTR RV20", today_ind.get("mstr_rv20"), "{:.1f}%", 100),

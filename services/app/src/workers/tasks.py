@@ -156,9 +156,22 @@ def send_daily_briefing() -> dict[str, int]:
     when the target weights don't change.  Users who want an explicit
     daily status can run /today on demand.
 
+    Also resets the live-panic state machine.  The daily strategy is
+    authoritative each morning — if it confirms panic, the next
+    intraday cycle (~15 min after market open) will re-enter live
+    panic.  If it doesn't, the false alarm is cleared and the
+    change-trigger broadcast naturally pushes a "return to normal"
+    signal because the target weights differ from the last sent ones.
+
     Returns broadcast stats (users seen / fired / skipped) for logging.
     """
+    from quant import live_decision
     from workers.telegram_handlers import broadcast_change_alert
+
+    try:
+        live_decision.reset_all()
+    except Exception:
+        logger.exception("live_panic reset failed (continuing)")
 
     try:
         return broadcast_change_alert()

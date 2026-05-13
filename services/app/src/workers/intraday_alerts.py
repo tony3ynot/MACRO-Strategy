@@ -49,7 +49,6 @@ logger = logging.getLogger(__name__)
 
 BIG_MOVE_THRESHOLD = 0.05         # ±5 % vs session open
 MNAV_BUCKETS = (0.95, 1.20, 1.50, 2.00)
-PANIC_DD_THRESHOLD = -0.15        # live book DD ≤ -15 %
 DEDUP_TTL_SECONDS = 24 * 3600
 
 
@@ -175,23 +174,20 @@ def check_mnav_bucket(engine: Engine) -> Alert | None:
     )
 
 
-def check_pre_close_panic(engine: Engine) -> Alert | None:
-    """Live book DD warning — uses today's session move + yesterday's equity.
+def compute_live_dd(engine: Engine) -> tuple[float, float, dict] | None:
+    """Approximate book DD using today's intraday MSTR move.
 
-    The proper panic decision is made by the daily strategy after the
-    market close.  But if MSTR is down a lot intraday and the strategy
-    is already underwater, the user benefits from knowing the panic
-    state is *likely* to flip today, before the formal compute runs
-    overnight.
+    Returns (live_dd, mstr_intraday_move, today_w_dict) or None if
+    insufficient data.
 
-    We approximate live book DD by:
-      • Re-running today's backtest with intraday MSTR substituted for
-        the latest daily close.  Cheap because we already cache the
-        result.
+    Logic:
+      live_eq  = backtest_final_eq × (1 + mstr_weight × intraday_move)
+      live_dd  = live_eq / peak_eq − 1
 
-    Simpler MVP heuristic used here: take the most recent backtest
-    equity, scale it by today's intraday MSTR move weighted by the
-    current target's MSTR position, and check the resulting DD.
+    This is a first-order approximation — it doesn't recompute the
+    full equity curve with intraday data, just adjusts today's
+    marked-to-market PnL by the MSTR move scaled by the current
+    MSTR target weight.  For panic-trigger purposes that's enough.
     """
     from quant.backtesting.data import assemble_full_panel
     from quant.backtesting.engine import run_backtest
@@ -201,56 +197,105 @@ def check_pre_close_panic(engine: Engine) -> Alert | None:
 
     panel, indicators = assemble_full_panel(engine)
     res = run_backtest(
-        name="live_panic_check",
+        name="live_dd",
         panel=panel, indicators=indicators,
         strategy=make_macro_trend_v5_with_breaker(),
         cost_bps=10.0,
     )
-    today_w = res.weights.iloc[-1]
-    mstr_w = float(today_w.get("MSTR", 0.0))
-    if mstr_w <= 0.005:
-        return None
-
+    today_w = {k: float(v) for k, v in res.weights.iloc[-1].items()}
+    mstr_w = today_w.get("MSTR", 0.0)
     move = session_move_pct(engine, "MSTR") or 0.0
     final_eq = float(res.equity.iloc[-1])
     peak_eq = float(res.equity.cummax().iloc[-1])
-    # Approx live equity: today's close PnL = mstr_w * intraday move
     live_eq = final_eq * (1.0 + mstr_w * move)
     live_dd = (live_eq / peak_eq - 1.0) if peak_eq > 0 else 0.0
+    return live_dd, move, today_w
 
-    if live_dd > PANIC_DD_THRESHOLD:
-        return None
-    key = f"alert:preclose_panic:{_today_utc()}"
-    if _already_fired(key):
-        return None
-    _mark_fired(key)
 
-    return Alert(
-        severity="danger",
-        title="장중 패닉 임박 — 보호장치 발동 가능",
-        body=(
-            f"현재 book DD (장중 추정): {live_dd*100:+.1f}%\n"
-            f"MSTR 장중: {move*100:+.2f}%\n\n"
-            "오늘 종가에 -15% 임계를 넘으면 전략 보호장치가 작동해\n"
-            "내일 아침 시그널에서 비중이 절반으로 줄어들 수 있어요.\n\n"
-            "지금 당장 매매를 권장하는 건 아니지만,\n"
-            "장 마감 전 가격 동향을 한 번 더 확인하세요."
-        ),
+def evaluate_live_panic(engine: Engine) -> tuple[bool, Alert | None]:
+    """Run the live-panic state machine for one observation.
+
+    Returns (did_just_activate, optional_alert).  If state transitioned
+    inactive → active, returns an action alert; otherwise returns None.
+
+    Daily strategy might already be in panic for today; in that case
+    we don't fire (nothing to fast-forward).
+    """
+    from quant import live_decision
+
+    out = compute_live_dd(engine)
+    if out is None:
+        return False, None
+    live_dd, move, today_w = out
+
+    # Sanity check: skip if the daily strategy has already cut weights
+    # below its own pre-panic baseline.  Heuristic: total weight < 0.7
+    # means we're either already panic'd or normally underweight; either
+    # way, the live trigger adds nothing.
+    if sum(today_w.values()) < 0.70:
+        return False, None
+
+    activated = live_decision.observe_dd(live_dd)
+    if not activated:
+        return False, None
+
+    # Build action alert with panic-applied weights
+    panic_w = live_decision.apply_live_panic(today_w)
+    lines = ["🚨🚨 장중 즉시 매도 신호 — 보호장치 작동", ""]
+    lines.append(
+        f"장중 책 DD가 -15 % 임계를 15분 이상 지속해서 보호장치가 발동했습니다."
     )
+    lines.append(f"  현재 추정 book DD: {live_dd*100:+.1f} %")
+    lines.append(f"  MSTR 장중: {move*100:+.2f} %")
+    lines.append("")
+    lines.append("📋 즉시 조정 권장 비중 (모든 포지션 × 0.5)")
+    lines.append("━━━━━━━━━━━━━━━━")
+    for t in ("MSTR", "MSTU", "MSTY", "MSTZ"):
+        if panic_w.get(t, 0.0) >= 0.005:
+            lines.append(f"  {t:<5}  {panic_w[t]*100:5.1f} %")
+    cash = max(0.0, 1.0 - sum(panic_w.values()))
+    if cash >= 0.005:
+        lines.append(f"  현금   {cash*100:5.1f} %")
+    lines.append("━━━━━━━━━━━━━━━━")
+    lines.append("")
+    lines.append("• 본 신호는 일봉 종가 전에 발동된 *예방적* 행동입니다.")
+    lines.append("• 내일 아침 일봉 시그널이 확인 → 비중 유지")
+    lines.append("• 내일 일봉 시그널이 반대 → false alarm으로 자동 복귀 신호")
+
+    return True, Alert(severity="danger", title="LIVE PANIC", body="\n".join(lines))
 
 
 # ─── Broadcast ────────────────────────────────────────────────────────
 
 
 def fire_alerts() -> dict[str, int]:
-    """Run all alert checks; broadcast to every configured user."""
+    """Run all alert checks; broadcast to every configured user.
+
+    Order matters:
+      1. evaluate_live_panic — the *action* trigger; if it transitions
+         to active, the panic state is set in Redis and we follow up
+         with a `broadcast_change_alert` so every user gets the new
+         target weights (not just an informational warning).
+      2. Informational alerts (big-move, mNAV bucket) follow as usual.
+
+    Live-panic warning ≠ live-panic action.  We no longer fire the old
+    "장중 패닉 임박" pre-close warning — it's been superseded by
+    evaluate_live_panic which actually changes the recommended target.
+    """
     client = TelegramClient()
     if not client.is_configured:
-        return {"alerts": 0, "users": 0}
+        return {"alerts": 0, "users": 0, "panic_activated": 0}
 
     engine = make_sync_engine()
+    panic_activated = False
+    panic_alert: Alert | None = None
+    try:
+        panic_activated, panic_alert = evaluate_live_panic(engine)
+    except Exception:
+        logger.exception("evaluate_live_panic failed")
+
     alerts: list[Alert] = []
-    for check in (check_big_move, check_mnav_bucket, check_pre_close_panic):
+    for check in (check_big_move, check_mnav_bucket):
         try:
             a = check(engine)
         except Exception:
@@ -258,9 +303,9 @@ def fire_alerts() -> dict[str, int]:
             continue
         if a is not None:
             alerts.append(a)
-
-    if not alerts:
-        return {"alerts": 0, "users": 0}
+    if panic_alert is not None:
+        # Surface the panic alert at the TOP regardless of dedup.
+        alerts.insert(0, panic_alert)
 
     chat_ids = [c for c in user_state.all_chat_ids()
                 if user_state.load(c).is_configured]
@@ -273,5 +318,18 @@ def fire_alerts() -> dict[str, int]:
             except Exception:
                 logger.exception("alert send failed: chat=%s", cid)
 
-    logger.info("intraday alerts: %s fired across %s users", fired, len(chat_ids))
-    return {"alerts": len(alerts), "users": len(chat_ids), "sent": fired}
+    # If live panic just activated, immediately broadcast a *change-alert*
+    # so each user sees the new target weights (with panic_scale applied).
+    if panic_activated:
+        from workers.telegram_handlers import broadcast_change_alert
+        try:
+            broadcast_change_alert()
+        except Exception:
+            logger.exception("post-panic broadcast failed")
+
+    return {
+        "alerts": len(alerts),
+        "users": len(chat_ids),
+        "sent": fired,
+        "panic_activated": int(panic_activated),
+    }

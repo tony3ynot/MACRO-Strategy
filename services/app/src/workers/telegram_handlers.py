@@ -63,7 +63,7 @@ def _fetch_today_view() -> dict[str, Any]:
     """Single backtest run; everything else slices the result.
 
     Returned dict has:
-      • today_w, prev_w        — target weight dicts
+      • today_w, prev_w        — target weight dicts (live_panic applied)
       • signal_date            — last index of indicators (US-close date)
       • alert_date             — today's KST date (caller may override)
       • mstr_price, btc_price  — floats or None
@@ -71,8 +71,16 @@ def _fetch_today_view() -> dict[str, Any]:
       • book_dd                — float (backtest equity peak)
       • indicators_row         — pd.Series for /detail
       • trades_per_year        — float
+      • live_panic             — bool: live state machine is active
+
+    The `today_w` returned here is the *effective* target — i.e., if
+    live_panic is active in Redis, weights are pre-scaled by 0.5 so
+    every downstream surface (briefing / /today / change-broadcast)
+    sees the same urgent target without each having to apply panic
+    logic on its own.
     """
     from core.db import make_sync_engine
+    from quant import live_decision
     from quant.backtesting.data import assemble_full_panel
     from quant.backtesting.engine import run_backtest
     from quant.backtesting.strategies.macro_trend_v5 import (
@@ -89,12 +97,17 @@ def _fetch_today_view() -> dict[str, Any]:
         cost_bps=10.0,
     )
 
-    today_w = {k: float(v) for k, v in res.weights.iloc[-1].items()}
+    today_w_raw = {k: float(v) for k, v in res.weights.iloc[-1].items()}
     prev_w = (
         {k: float(v) for k, v in res.weights.iloc[-2].items()}
         if len(res.weights) > 1
-        else today_w
+        else today_w_raw
     )
+
+    # Apply live_panic override if active.  This makes _fetch_today_view
+    # the single source of truth for "what should the user hold right now."
+    live_panic_active = live_decision.is_active()
+    today_w = live_decision.apply_live_panic(today_w_raw)
 
     signal_idx = indicators.index[-1]
     today_ind = indicators.loc[signal_idx]
@@ -114,15 +127,17 @@ def _fetch_today_view() -> dict[str, Any]:
 
     return {
         "today_w": today_w,
+        "today_w_raw": today_w_raw,
         "prev_w": prev_w,
         "signal_date": signal_idx,
         "alert_date": date.today(),
         "mstr_price": _scalar(today_ind.get("mstr_close")),
         "btc_price": _scalar(today_ind.get("btc_close")),
-        "de_risked": de_risked,
+        "de_risked": de_risked or live_panic_active,
         "book_dd": book_dd,
         "indicators_row": today_ind,
         "trades_per_year": res.metrics["trades"] / 5.1,
+        "live_panic": live_panic_active,
     }
 
 
@@ -140,18 +155,30 @@ def _build_status_for(chat_id: int) -> tuple[str, list[list[dict[str, str]]]]:
         balance=state.balance,
         mstr_price=view["mstr_price"],
         btc_price=view["btc_price"],
+        live_panic=view["live_panic"],
     )
     return text, SIGNAL_KEYBOARD
 
 
 def _build_detail_for(_chat_id: int) -> str:
+    from core.db import make_sync_engine
+    from quant.intraday import live_mnav as _live_mnav
+
     view = _fetch_today_view()
+    engine = make_sync_engine()
+    try:
+        live = _live_mnav(engine)
+    except Exception:
+        logger.exception("live_mnav failed (continuing without)")
+        live = None
     return build_detail_message(
         signal_date=view["signal_date"],
         today_ind=view["indicators_row"],
         today_w=view["today_w"],
         book_dd=view["book_dd"],
         trades_per_year=view["trades_per_year"],
+        live_mnav=live,
+        live_panic=view["live_panic"],
     )
 
 
@@ -450,6 +477,7 @@ def broadcast_change_alert() -> dict[str, int]:
             balance=state.balance,
             mstr_price=view["mstr_price"],
             btc_price=view["btc_price"],
+            live_panic=view["live_panic"],
         )
         try:
             client.send_with_keyboard(text, SIGNAL_KEYBOARD, chat_id=cid)
