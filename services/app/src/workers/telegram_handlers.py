@@ -217,44 +217,82 @@ def _build_pnl_for(chat_id: int) -> str:
         return "💡 배포일이 없어 수익률을 계산할 수 없어요. /setbalance 를 다시 한 번 실행해 주세요."
 
     last_available = panel.index.max().date()
+    fills = user_state.list_fills(chat_id)
+
+    sections: list[str] = []
+
+    # 1. Real-fills section — always show if any fills recorded
+    if fills:
+        shares, spent = user_state.aggregate_holdings(fills)
+        cash_left = state.balance - spent
+        holdings_value = 0.0
+        missing: list[str] = []
+        for t, n in shares.items():
+            try:
+                holdings_value += n * float(panel[(t, "close")].iloc[-1])
+            except KeyError:
+                missing.append(t)
+        real_total = cash_left + holdings_value
+        real_ret = (real_total / state.balance) - 1.0
+        sections += [
+            "💼 실거래 기준 (recorded fills)",
+            "━━━━━━━━━━━━━━━━",
+            f"  초기 자금: ${state.balance:,.2f}",
+            f"  현금 잔액: ${cash_left:,.2f}",
+            f"  보유 평가: ${holdings_value:,.2f}",
+            f"  합계:    ${real_total:,.2f}  ({real_ret*100:+.2f}%)",
+            f"  ({len(fills)}건 거래 기록 — /fills 로 상세)",
+        ]
+        if missing:
+            sections.append(f"  ⚠ 가격 데이터 누락: {', '.join(missing)}")
+
+    # 2. Backtest section — only if there's enough market data since deploy
     if deploy > last_available:
         days_until = (deploy - last_available).days
-        return (
-            f"💡 배포일({deploy.isoformat()})이 최신 시장 데이터({last_available.isoformat()}) 이후입니다.\n"
-            f"수익률은 거래일 데이터가 들어온 뒤부터 측정돼요. (약 {days_until}일 후)"
+        sections += [
+            "",
+            "📊 백테스트 기준 (시뮬레이션)",
+            "━━━━━━━━━━━━━━━━",
+            f"  배포일({deploy.isoformat()})이 최신 시장 데이터({last_available.isoformat()}) 이후",
+            f"  수익률 측정은 거래일 데이터가 들어온 뒤부터 (약 {days_until}일 후)",
+        ]
+    elif (last_available - deploy).days < 1:
+        sections += [
+            "",
+            "📊 백테스트 기준 (시뮬레이션)",
+            "━━━━━━━━━━━━━━━━",
+            f"  배포 첫날 ({deploy.isoformat()}) — 다음 거래일 종가 후 측정 가능",
+        ]
+    else:
+        strat_res = run_backtest(
+            name="pnl_strategy",
+            panel=panel, indicators=indicators,
+            strategy=make_macro_trend_v5_with_breaker(),
+            cost_bps=15.0,
+            start_date=deploy,
+            seed=state.balance,
         )
-    days_in = (last_available - deploy).days
-    if days_in < 1:
-        return (
-            f"💡 배포 첫날입니다 ({deploy.isoformat()}).\n"
-            "수익률은 다음 거래일 종가가 들어와야 측정됩니다.\n"
-            "내일 다시 /pnl 을 확인해 주세요."
+        bh_res = run_backtest(
+            name="pnl_bh",
+            panel=panel, indicators=indicators,
+            strategy=buy_and_hold("MSTR"),
+            cost_bps=15.0,
+            start_date=deploy,
+            seed=state.balance,
         )
+        today = strat_res.equity.index[-1].date()
+        bt_msg = build_pnl_message(
+            deploy_date=deploy,
+            today=today,
+            initial_balance=state.balance,
+            strategy_value=float(strat_res.equity.iloc[-1]),
+            bh_value=float(bh_res.equity.iloc[-1]),
+        )
+        sections += ["", bt_msg]
 
-    strat_res = run_backtest(
-        name="pnl_strategy",
-        panel=panel, indicators=indicators,
-        strategy=make_macro_trend_v5_with_breaker(),
-        cost_bps=15.0,
-        start_date=deploy,
-        seed=state.balance,
-    )
-    bh_res = run_backtest(
-        name="pnl_bh",
-        panel=panel, indicators=indicators,
-        strategy=buy_and_hold("MSTR"),
-        cost_bps=15.0,
-        start_date=deploy,
-        seed=state.balance,
-    )
-    today = strat_res.equity.index[-1].date()
-    return build_pnl_message(
-        deploy_date=deploy,
-        today=today,
-        initial_balance=state.balance,
-        strategy_value=float(strat_res.equity.iloc[-1]),
-        bh_value=float(bh_res.equity.iloc[-1]),
-    )
+    if not sections:
+        return "💡 거래 기록 없음, 백테스트 기간 없음."
+    return "\n".join(sections)
 
 
 # ─── Update routing ───────────────────────────────────────────────────
@@ -351,11 +389,77 @@ def _cmd_setbalance(client: TelegramClient, chat_id: int, args: list[str]) -> No
 
 def _cmd_reset(client: TelegramClient, chat_id: int, _args: list[str]) -> None:
     user_state.reset_deploy(chat_id)
+    user_state.clear_fills(chat_id)
     client.send_plain(
-        "✅ 등록 정보를 초기화했어요.\n"
+        "✅ 등록 정보 + 실거래 기록을 초기화했어요.\n"
         "/setbalance 으로 다시 시작할 수 있어요.",
         chat_id=chat_id,
     )
+
+
+def _cmd_fill(client: TelegramClient, chat_id: int, args: list[str]) -> None:
+    """`/fill MSTR 5 188.50 [YYYY-MM-DD]` — record a real trade.
+
+    Positive shares = buy, negative = sell.  Optional traded_at date
+    defaults to today (KST clock; equity_ohlcv close prices are US).
+    """
+    if len(args) < 3:
+        client.send_plain(
+            "사용법: /fill <ticker> <주식수> <가격> [날짜]\n"
+            "예: /fill MSTR 5 188.50\n"
+            "예: /fill MSTR -3 195.20    ← 매도 (음수)\n"
+            "예: /fill MSTR 5 188.50 2026-05-25",
+            chat_id=chat_id,
+        )
+        return
+    try:
+        ticker = args[0].upper()
+        shares = float(args[1].replace(",", ""))
+        price = float(args[2].replace(",", "").lstrip("$"))
+        traded_at = date.fromisoformat(args[3]) if len(args) >= 4 else date.today()
+    except (ValueError, IndexError) as exc:
+        client.send_plain(f"파싱 실패: {exc}\n사용법: /fill MSTR 5 188.50", chat_id=chat_id)
+        return
+
+    fill = user_state.add_fill(chat_id, ticker, shares, price, traded_at)
+    action = "🟢 매수" if shares > 0 else "🔴 매도"
+    total = abs(shares) * price
+    msg = (
+        f"✅ 거래 기록 완료\n"
+        f"{action} {ticker} {abs(shares):.4g}주 @ ${price:,.2f} "
+        f"= ${total:,.2f}\n"
+        f"거래일: {fill['traded_at']}"
+    )
+    fills = user_state.list_fills(chat_id)
+    msg += f"\n\n총 기록 {len(fills)}건. /fills 로 전체 조회, /pnl 로 실현 수익률 확인."
+    client.send_plain(msg, chat_id=chat_id)
+
+
+def _cmd_fills(client: TelegramClient, chat_id: int, _args: list[str]) -> None:
+    fills = user_state.list_fills(chat_id)
+    if not fills:
+        client.send_plain(
+            "기록된 거래 없음.\n/fill <ticker> <주식수> <가격> 으로 추가하세요.",
+            chat_id=chat_id,
+        )
+        return
+    shares, spent = user_state.aggregate_holdings(fills)
+    lines = ["📋 실거래 기록 (시간순)", ""]
+    for i, f in enumerate(fills, 1):
+        side = "🟢 매수" if f["shares"] > 0 else "🔴 매도"
+        lines.append(
+            f"  {i:>2}. {f['traded_at']} {side} {f['ticker']} "
+            f"{abs(f['shares']):.4g}주 @ ${f['price']:,.2f}"
+        )
+    lines += ["", "📊 현재 보유 (집계)"]
+    if not shares:
+        lines.append("  포지션 없음")
+    else:
+        for t, s in sorted(shares.items()):
+            lines.append(f"  {t:<6} {s:>+10.4g}주")
+    lines.append(f"\n💵 누적 순지출: ${spent:,.2f}")
+    lines.append("\n실수로 잘못 입력 → /reset (모두 초기화)")
+    client.send_plain("\n".join(lines), chat_id=chat_id)
 
 
 COMMANDS = {
@@ -365,6 +469,8 @@ COMMANDS = {
     "/detail":     _cmd_detail,
     "/history":    _cmd_history,
     "/pnl":        _cmd_pnl,
+    "/fill":       _cmd_fill,
+    "/fills":      _cmd_fills,
     "/help":       _cmd_help,
     "/setbalance": _cmd_setbalance,
     "/reset":      _cmd_reset,

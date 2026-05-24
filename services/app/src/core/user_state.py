@@ -111,6 +111,62 @@ def get_last_signal_at(chat_id: int | str) -> date | None:
     return date.fromisoformat(raw) if raw else None
 
 
+# ─── Real trade fills (Phase 5+) ──────────────────────────────────────
+# Schema in Redis (list of JSON blobs, oldest → newest):
+#   user:{chat_id}:fills = ["{ticker,shares,price,traded_at,recorded_at}", ...]
+#
+# A positive `shares` = bought, negative = sold.  We don't try to model
+# FIFO/LIFO realised PnL — for a personal bot the user only cares about
+# *mark-to-market* total return vs the strategy's simulated return.
+
+
+def add_fill(
+    chat_id: int | str,
+    ticker: str,
+    shares: float,
+    price: float,
+    traded_at: date | None = None,
+) -> dict:
+    from datetime import datetime, timezone
+    fill = {
+        "ticker": ticker.upper(),
+        "shares": float(shares),
+        "price": float(price),
+        "traded_at": (traded_at or date.today()).isoformat(),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _r().rpush(_k(chat_id, "fills"), json.dumps(fill))
+    return fill
+
+
+def list_fills(chat_id: int | str) -> list[dict]:
+    raw = _r().lrange(_k(chat_id, "fills"), 0, -1)
+    return [json.loads(s) for s in raw]
+
+
+def clear_fills(chat_id: int | str) -> int:
+    return _r().delete(_k(chat_id, "fills"))
+
+
+def aggregate_holdings(fills: list[dict]) -> tuple[dict[str, float], float]:
+    """Sum fills → (shares_per_ticker, net_cash_spent).
+
+    net_cash_spent is positive when the user has spent more cash buying
+    than they've received from selling.  Combined with the initial
+    balance this yields current cash on hand:
+        cash_on_hand = initial_balance - net_cash_spent
+    """
+    shares: dict[str, float] = {}
+    spent = 0.0
+    for f in fills:
+        t = f["ticker"]
+        shares[t] = shares.get(t, 0.0) + float(f["shares"])
+        spent += float(f["shares"]) * float(f["price"])
+    # drop near-zero residuals
+    shares = {t: s for t, s in shares.items() if abs(s) > 1e-6}
+    return shares, spent
+
+
 # ─── Convenience accessor ─────────────────────────────────────────────
 
 

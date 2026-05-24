@@ -174,10 +174,46 @@ def send_daily_briefing() -> dict[str, int]:
         logger.exception("live_panic reset failed (continuing)")
 
     try:
-        return broadcast_change_alert()
+        result = broadcast_change_alert()
     except Exception:
         logger.exception("send_daily_briefing: broadcast crashed")
         return {"error": 1}
+
+    # Heartbeat: if no signals fired, send a silent "alive" line so users
+    # can tell the difference between "no change today" and "the bot died".
+    # Telegram `disable_notification` shows the line in history without
+    # ringing — quiet days don't wake people up but a missing line for 2
+    # consecutive days does.
+    if result.get("fired", 0) == 0:
+        from datetime import date
+
+        from core import user_state
+        from core.notifications.briefing import _ko_date
+        from core.notifications.telegram import TelegramClient
+
+        try:
+            client = TelegramClient()
+            heartbeat = (
+                f"✅ MACRO 봇 가동 중 — {_ko_date(date.today())}\n"
+                "오늘 매매 신호 없음 — 기존 비중 유지\n"
+                "(매일 09시에 이 메시지가 안 오면 봇 점검 필요)"
+            )
+            sent = 0
+            for cid in user_state.all_chat_ids():
+                if not user_state.load(cid).is_configured:
+                    continue
+                client.send_message(
+                    text=heartbeat,
+                    parse_mode="",
+                    chat_id=cid,
+                    disable_notification=True,  # silent — chat history only
+                )
+                sent += 1
+            result["heartbeats_sent"] = sent
+        except Exception:
+            logger.exception("heartbeat send failed")
+
+    return result
 
 
 @celery_app.task(name="workers.tasks.poll_telegram_updates")
