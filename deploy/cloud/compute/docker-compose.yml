@@ -1,0 +1,34 @@
+# macro-compute instance: app (FastAPI) + worker (Celery beat + worker).
+# Connects to postgres + redis on the macro-data instance via private IP.
+#
+# Resources tuned for OCI VM.Standard.E2.1.Micro (1 vCPU / 1 GB RAM).
+# Single worker process; concurrency 1.  The strategy backtests are the
+# only memory-hungry operation; we run them serially inside one worker
+# rather than parallelising.
+
+services:
+  app:
+    build:
+      context: ./services/app
+    image: macro-strategy-app:cloud
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    mem_limit: 320m
+    mem_reservation: 160m
+
+  worker:
+    image: macro-strategy-app:cloud
+    restart: unless-stopped
+    env_file: .env
+    command: >
+      celery -A workers.celery_app worker --beat
+      --schedule=/tmp/celerybeat-schedule
+      --concurrency=1 --loglevel=info
+      --max-tasks-per-child=50
+    mem_limit: 480m
+    mem_reservation: 240m
+    depends_on:
+      - app
