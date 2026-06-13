@@ -5,9 +5,10 @@
 
 ### Market-Adaptive Covered-call Regime Optimizer
 
-![Status](https://img.shields.io/badge/status-Phase_2_Validated-brightgreen)
+![Status](https://img.shields.io/badge/status-Live_24%2F7-brightgreen)
 ![Stack](https://img.shields.io/badge/stack-FastAPI%20%7C%20TimescaleDB%20%7C%20Celery-blue)
 ![Data](https://img.shields.io/badge/data-yfinance%20%7C%20Polygon%20%7C%20Deribit%20%7C%20Hyperliquid-success)
+![Bot](https://img.shields.io/badge/bot-Telegram%20signal--driven-26A5E4)
 ![Cost](https://img.shields.io/badge/monthly_cost-%240-brightgreen)
 
 > **Rotating between MSTR delta exposure and MSTY premium harvest based on volatility regime — quant alpha without options, leverage abuse, or institutional infrastructure.**
@@ -43,7 +44,10 @@ overlay: MSTY   0    - 0.35   ← narrow vol-seller window
                                 (IV>40% + VRP>3% + RV<50% + MSTR within ±15% of MA200)
 hedge  : cash                 ← MSTR<MA50<MA200 + VRP≤0 → halve MSTR/MSTY, residual = cash
 breaker: book DD ≤ -15%       → multiply every weight by 0.50 (raise cash, no short)
-         book DD ≥ -10%       → exit panic, full size
+         book DD ≥ -10% OR
+         5-day trend recovery → exit panic, full size (dual-condition exit, D8)
+live   : intraday DD ≤ -15%   → live panic state (D10) — actionable signal before
+         sustained 15 min       daily close; next daily compute confirms/rejects
 ```
 
 ### Validation — EXTENDED + LIVE (LONG omitted — BTC indicators absent pre-2021 → MSTY harvest dormant)
@@ -98,10 +102,10 @@ All sources free. No one-time purchases. Monthly fixed cost: **$0**.
 
 | Tier | Source | Coverage | Role |
 |---|---|---|---|
-| **1. Crypto-Native** *(24/7 leading)* | Deribit (options, DVOL), Coinbase·Binance (spot), Hyperliquid·Bybit (funding, OI, liquidations) | 5+ years | Leading signal, denoising baseline |
+| **1. Crypto-Native** *(24/7 leading)* | Deribit (options, DVOL), Coinbase·Binance (spot), Hyperliquid·Bybit (funding, OI) | 5+ years | Leading signal, denoising baseline |
 | **2. Equity** *(US hours, primary)* | yfinance (MSTR/MSTU/MSTY/MSTZ OHLCV + distributions), Polygon Options Basic (MSTR options chain 2y EOD) | 2 - 25+ years | Tradable assets' realized returns, MSTR-specific IV |
 | **3. Fundamental** | SEC 8-K scrape (MSTR BTC holdings, capital structure), YieldMax IR (MSTY distribution announcements) | 2020-08+ | mNAV (EV-adjusted), distribution timing |
-| **4. Macro** | FRED (DGS10, DXY, MOVE) | Decades | Market context |
+| **4. Intraday** ⭐ | yfinance MSTR 1m REST + Coinbase BTC spot 1m REST | Real-time (D9+) | live mNAV / live book DD / intraday alert engine |
 
 ---
 
@@ -111,11 +115,10 @@ All sources free. No one-time purchases. Monthly fixed cost: **$0**.
 |---|---|
 | **Backend** | Python 3.12, FastAPI, SQLAlchemy 2.0 (async), Celery |
 | **Database** | PostgreSQL 16 + **TimescaleDB** (hypertables, continuous aggregates, compression) |
-| **Cache / Queue** | Redis 7 |
-| **Quant** | pandas, numpy, scipy, filterpy (Kalman), vectorbt-style backtester |
-| **Frontend** *(Phase 5)* | Next.js 14, Tailwind, TanStack Query, Orval (OpenAPI typed client) |
-| **Infrastructure** | Docker Compose, Oracle Cloud Free Tier (Ampere ARM A1, 4c/24GB), Cloudflare Tunnel |
-| **Notifications** | Telegram Bot (regime transitions + 9AM daily briefing) |
+| **Cache / State** | Redis 7 (user state, signal dedup, live-panic state machine) |
+| **Quant** | pandas, numpy, scipy, vectorbt-style backtester |
+| **Notifications** | Telegram Bot (Korean, action-first, change-triggered + heartbeat) |
+| **Infrastructure** | Docker Compose, **Oracle Cloud Always-Free** (2× E2.1.Micro split-host, $0/mo) |
 
 ---
 
@@ -125,43 +128,42 @@ All sources free. No one-time purchases. Monthly fixed cost: **$0**.
 graph LR
   subgraph S["Data Sources"]
     direction TB
-    D[Deribit<br/>BTC Options]
-    Y[yfinance<br/>Equities]
-    P[Polygon<br/>MSTR Options]
-    H[Hyperliquid<br/>Funding/OI]
-    F[8-K + IR<br/>Scrapers]
+    D[Deribit BTC Options]
+    Y[yfinance Equities<br/>+ 1m intraday]
+    P[Polygon MSTR Options]
+    H[Hyperliquid Funding]
+    C[Coinbase BTC<br/>spot 1m]
+    F[8-K + IR Scrapers]
   end
 
-  subgraph I["Ingestion"]
+  subgraph DB["TimescaleDB on macro-data"]
     direction TB
-    R[Rate-Limited<br/>Connectors]
-    AU[Audit Log]
+    OHL[equity_ohlcv]
+    OPT[options_chain]
+    BTC[btc_ohlcv_daily]
+    IND_T[indicators_daily]
+    INT[intraday_prices ⭐]
+    FUN[mstr_btc_holdings<br/>distributions]
   end
 
-  subgraph DB["TimescaleDB"]
+  subgraph Q["Quant Core on macro-compute"]
     direction TB
-    OHL[Equity OHLCV]
-    OPT[Options Chain]
-    BTC[BTC 1m + Options]
-    FUN[Fundamentals]
-  end
-
-  subgraph Q["Quant Core"]
-    direction TB
-    IND[VRP, mNAV, RV]
-    DEC[IV Decomposition<br/>β·BTC + Residual]
-    KAL[Kalman Filter]
-    REG[4-State Classifier]
+    IND[VRP / mNAV / RV / β]
+    BT[macro_trend_v5_breaker]
+    LP[live_panic state machine ⭐]
+    AL[intraday_alerts ⭐]
   end
 
   subgraph O["Output"]
     direction TB
-    TG[Telegram Bot]
-    DASH[Next.js Dashboard]
-    API[FastAPI]
+    TG[Telegram Bot<br/>change-triggered]
+    HB[09:00 KST heartbeat]
+    API[FastAPI /health]
   end
 
-  S --> I --> DB --> Q --> O
+  S --> DB
+  DB --> Q
+  Q --> O
 ```
 
 ---
@@ -170,34 +172,40 @@ graph LR
 
 ```
 MACRO-Strategy/
-├── docker-compose.yml          # core: postgres, redis, app, worker
-├── docker-compose.jupyter.yml  # opt-in research env (jupyter only)
-├── Makefile                    # ops shortcuts (verify-*, backtest, walk-forward, …)
-├── docs/
-│   └── STRATEGY.md             # formal allocator spec (priority over README)
-├── services/
-│   ├── postgres/init/          # extensions + bootstrap SQL
-│   └── app/
-│       ├── Dockerfile
-│       ├── requirements.txt
-│       ├── migrations/         # alembic 005: initial → indicators_daily
-│       └── src/
-│           ├── api/            # FastAPI (health endpoint)
-│           ├── core/           # config, db, ingestor base, rate limiter, telegram
-│           ├── connectors/     # yfinance / deribit / coinbase / polygon /
-│           │                   # binance / hyperliquid / sec_edgar / yieldmax
-│           ├── workers/        # celery tasks + beat schedule
-│           ├── quant/
-│           │   ├── indicators/   # realized_vol, btc_vrp, mnav, mstr_iv,
-│           │   │                 # iv_decomposition
-│           │   ├── backtesting/  # engine, data, strategies (macro_trend,
-│           │   │                 # macro_regime, benchmarks)
-│           │   ├── blackscholes.py    # BS pricer + IV inversion
-│           │   └── risk_free.py       # FRED DGS1MO fetch
-│           └── scripts/        # backfill_*, compute_*, run_backtest,
-│                               # walk_forward_validation
-└── research/notebooks/         # jupyter (read-only DB role)
+├── docker-compose.yml          # local dev: postgres, redis, app, worker
+├── deploy/cloud/               # ☁ Oracle Cloud split-host deployment
+│   ├── data/    docker-compose.yml + .env.example   (postgres + redis)
+│   ├── compute/ docker-compose.yml + .env.example   (app + worker+beat)
+│   └── README.md   bootstrap + restore + ops notes
+├── docs/STRATEGY.md            # formal allocator spec (priority over README)
+├── services/app/
+│   ├── Dockerfile
+│   ├── migrations/             # alembic 006: + intraday_prices hypertable
+│   └── src/
+│       ├── api/                # FastAPI (health endpoint)
+│       ├── core/
+│       │   ├── user_state.py   # ⭐ Redis: balance, deploy_date, fills, signal dedup
+│       │   └── notifications/  # telegram client + Korean briefing builders
+│       ├── connectors/
+│       │   ├── yfinance/coinbase/polygon/binance/hyperliquid/sec_edgar/yieldmax/deribit
+│       │   └── intraday_prices.py   # ⭐ 1m polling MSTR (yfinance) + BTC (Coinbase)
+│       ├── workers/
+│       │   ├── tasks.py            # celery tasks (ingest / compute / briefing / poll / intraday)
+│       │   ├── beat_schedule.py    # cron-style schedule
+│       │   ├── telegram_handlers.py# ⭐ /today /detail /history /pnl /fill /fills /setbalance /help
+│       │   └── intraday_alerts.py  # ⭐ big-move + mNAV-cross + live-panic
+│       ├── quant/
+│       │   ├── indicators/         # realized_vol, btc_vrp, mnav, mstr_iv, iv_decomposition
+│       │   ├── intraday.py         # ⭐ live_mnav + session-move helpers
+│       │   ├── live_decision.py    # ⭐ live panic state machine (Redis)
+│       │   ├── backtesting/        # engine, data, reports, strategies
+│       │   └── blackscholes.py / risk_free.py
+│       └── scripts/                # backfill_*, compute_*, run_backtest,
+│                                   # walk_forward_validation, validate_live_panic ⭐
+└── research/notebooks/             # jupyter (read-only DB role)
 ```
+
+⭐ = added during D8-D11 (briefing UI, intraday alerts, live panic, fills tracking, cloud split-host)
 
 ---
 
@@ -205,23 +213,59 @@ MACRO-Strategy/
 
 | Phase | Status | Deliverable |
 |---|---|---|
-| **1. Foundation** | ✅ Done | Docker stack, schema, 7 ingestors backfilled (MSTR/MSTU/MSTY/MSTZ, BTC daily/DVOL, MSTR holdings, Binance/Hyperliquid funding, YieldMax ROC, Polygon options 2y) |
-| **2. Quant Core** | ✅ Done | indicators_daily (RV/IV/VRP/mNAV/β/EquityPremium), per-month historical Polygon backfill, 4-state allocator, walk-forward OOS validation, parameter robustness |
-| **3. Live Signal** | ▶ Next | Telegram daily briefing populated with current state + recommended allocation, regime-transition push |
-| **4. Dashboard** | ☐ Planned | Next.js mobile-first read-only dashboard |
-| **5. Deployment** | ☐ Planned | Oracle Cloud ARM (free tier), Cloudflare Tunnel, daily DB snapshot |
-| **2.5 backlog** | ☐ Planned | SEC 10-Q shares-out scraper (mNAV), Kalman β smoother, K-means regime classifier upgrade |
+| **1. Foundation** | ✅ Done | Docker stack, schema, 8 ingestors backfilled (MSTR family, BTC daily/DVOL, MSTR holdings, Binance/Hyperliquid funding, YieldMax ROC, Polygon options 2y) |
+| **2. Quant Core** | ✅ Done | indicators_daily (RV/IV/VRP/mNAV/β/EquityPremium), per-month historical Polygon backfill, walk-forward OOS, parameter sweeps, attribution |
+| **3. Production Strategy** | ✅ Done | `macro_trend_v5_breaker` — dual-condition panic exit (D8); MSTU/MSTZ removed after net-negative attribution; 9-year backtest validated |
+| **4. Telegram Bot (D9)** | ✅ Done | Korean action-first briefing, /today /detail /history /pnl /help, inline keyboard, change-triggered (no fluff), share-quantity calc |
+| **4a. Phase 2 intraday (D9)** | ✅ Done | `intraday_prices` hypertable, MSTR + BTC 1m polling, 3 alert types (big move, mNAV bucket cross, pre-close warning) |
+| **4b. Live Panic (D10)** | ✅ Done | `live_decision` state machine — 15-min sustained intraday DD → action signal; historical false-alarm rate 1.8% |
+| **5. Cloud Deployment** | ✅ Done | Oracle Cloud Always-Free split-host (data + compute on 2 micro instances), $0/mo, auto-restart on reboot |
+| **6. Live-Trading Ops (D11)** | ✅ Done | 09:00 KST heartbeat (silent on quiet days), daily pg_dump (7-day rotation), `/fill /fills` real-trade tracker with mark-to-market PnL |
+| **7. Backlog** | ☐ | SEC 10-Q shares-out scraper (mNAV historical accuracy), real-fill execution-quality dashboard, Object Storage off-host backup |
 
 ---
 
-## Quick Start
+## Live Operation — Telegram Bot
+
+Running 24/7 in the cloud. Fires only on target changes (silent ✅ heartbeat otherwise) so quiet days don't ring your phone.
+
+### User commands
+
+| Command | Effect |
+|---|---|
+| `/setbalance <USD>` | Register investable capital (used for share-count calculation) |
+| `/today` | Current target allocation + share quantities |
+| `/detail` | Prices / mNAV (daily + live) / VRP / β / backtest DD |
+| `/history` | Backtest cumulative returns (lifetime / year / last 12 months, vs BH) |
+| `/pnl` | Real PnL from recorded fills + simulated backtest PnL, side-by-side |
+| `/fill <ticker> <shares> <price> [date]` | Record an actual trade (negative shares = sell) |
+| `/fills` | List all recorded trades + current holdings |
+| `/reset` | Wipe registration + fills (clean restart) |
+| `/help` | Strategy explanation + command help |
+
+### Automated alerts
+
+| Type | Trigger | Cadence |
+|---|---|---|
+| **🚨 Signal change** | Target weights change vs. last sent | Post daily-close (~22:30 UTC) |
+| **🔔 Big move** | MSTR ±5 % intraday (±10 % danger) | US session, dedup'd per day per direction |
+| **🔔 mNAV bucket cross** | Crosses 0.95 / 1.20 / 1.50 / 2.00 | US session, dedup'd per boundary per day |
+| **🚨🚨 LIVE PANIC** | Live book DD ≤ -15 % sustained 15 min | US session, dedup'd per day |
+| **✅ Heartbeat** | Silent one-liner on quiet days | 09:00 KST daily |
+
+### Deployment
 
 ```bash
+# Local dev
 git clone <repo> && cd MACRO-Strategy
-make up                  # First run: 5-8 min (image pull + Python deps install)
-make verify-health       # → {"status":"ok","db":true,"timescaledb":"2.x.x","redis":true}
-make help                # List all targets
+make up
+make verify-health  # → {"status":"ok","db":true,"timescaledb":"2.x.x","redis":true}
+
+# Cloud (Oracle Always-Free, $0/mo)
+# Full guide: deploy/cloud/README.md
 ```
+
+### Local Makefile targets
 
 | Command | Effect |
 |---|---|
@@ -236,23 +280,19 @@ make help                # List all targets
 
 ## Risk Management
 
-No discretion — every entry/exit is a pre-defined gate or vol-target sizing rule.
+No discretion — every weight decision is mNAV bucket + trend filter + safety stops.
 
 | Mechanism | Behaviour |
 |---|---|
-| **Vol targeting (Hurst-Ooi-Pedersen 2017)** | ACCUMULATE leverage = clamp(0.50 / MSTR_RV20, 0.5×, 2.0×) — leverage shrinks automatically as realised vol rises |
-| **Overheat de-risk** | MSTR > MA200 by +10% → leverage capped at 1.0×; +20% → capped at 0.5× |
-| **mNAV cap** | mNAV ≥ 1.5 (50%+ premium) → MSTU weight forced to 0, MSTR-only |
-| **Hysteresis** | Risk-on transitions (ACCUMULATE/HEDGE) require 2-day confirmation; de-risking is instant |
-| **HARVEST narrow gate** | 4-condition AND — IV>40% **AND** VRP>3% **AND** RV<50% **AND** MSTR within ±10% of MA200 — only enters narrow vol-seller windows |
+| **mNAV bucket curve** | mNAV ≤ 0.95 → MSTR 100 %; 0.95–1.20 → 90 %; 1.20–1.50 → 80 %; 1.50–2.00 → 65 %; > 2.00 → 50 %. Auto-deleverage as premium rises |
+| **MSTY narrow harvest** | 4-condition AND — VRP > 3 % **AND** RV < 50 % **AND** IV > 40 % **AND** MSTR within ±15 % of MA200 — only opens MSTY in narrow vol-seller windows |
+| **Trend hedge** | MSTR < MA50 < MA200 **AND** VRP ≤ 0 → every weight × 0.5 (raise cash, no short) |
+| **Drawdown breaker (daily)** | Book DD ≤ -15 % **AND** trend not confirmed → every weight × 0.5.  Exit on dual condition (DD ≥ -10 % OR 5-day trend confirm) |
+| **Live panic (intraday)** | Live book DD ≤ -15 % sustained 15 min → fire actionable signal + apply panic weights before daily close.  Next daily compute confirms / rejects |
+| **MSTU / MSTZ excluded** | Both showed net-negative EV in the 5-year attribution and are deliberately removed.  Korean retail has no 1× inverse alternative |
 
-Every threshold and the D5 walk-forward validation behind it is in
+Every threshold and the walk-forward validation behind it lives in
 [`docs/STRATEGY.md §3-§6`](docs/STRATEGY.md#3-per-state-allocation).
-
-### Core Asset (MSTR + MSTY)
-
-Always ≥ **70%** of portfolio. Overlay is *enhancement*, not bet-the-farm.
-Phase 3 backtest will A/B (Core only) vs. (Core + Overlay); Overlay enters production only if OOS Sharpe demonstrably improves.
 
 ---
 
